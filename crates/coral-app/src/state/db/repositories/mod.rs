@@ -1,3 +1,4 @@
+pub(crate) mod credential_documents;
 pub(crate) mod feedback_reports;
 pub(crate) mod identity_specs;
 pub(crate) mod materializations;
