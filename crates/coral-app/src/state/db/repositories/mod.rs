@@ -7,6 +7,7 @@ pub(crate) mod sources;
 pub(crate) mod state_migrations;
 pub(crate) mod task_queries;
 pub(crate) mod tasks;
+pub(crate) mod trace_summaries;
 pub(crate) mod workspaces;
 
 #[cfg(test)]

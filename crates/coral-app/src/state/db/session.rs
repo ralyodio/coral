@@ -17,6 +17,7 @@ use crate::state::db::repositories::sources::SourcesRepo;
 use crate::state::db::repositories::state_migrations::StateMigrationsRepo;
 use crate::state::db::repositories::task_queries::TaskQueriesRepo;
 use crate::state::db::repositories::tasks::TasksRepo;
+use crate::state::db::repositories::trace_summaries::TraceSummariesRepo;
 use crate::state::db::repositories::workspaces::WorkspacesRepo;
 
 pub(crate) trait DbSession {
@@ -92,6 +93,17 @@ pub(crate) trait DbRepos: DbSession + Sized {
 
     fn credential_documents(&mut self) -> CredentialDocumentsRepo<'_, Self> {
         CredentialDocumentsRepo::new(self)
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "trace summary repository lands before runtime wiring in the stacked PR sequence"
+        )
+    )]
+    fn trace_summaries(&mut self) -> TraceSummariesRepo<'_, Self> {
+        TraceSummariesRepo::new(self)
     }
 }
 
