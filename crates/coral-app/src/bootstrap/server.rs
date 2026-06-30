@@ -70,7 +70,7 @@ use crate::sources::materialization::SourceDiagnosticReporter;
 use crate::sources::service::SourceService;
 use crate::state::db::{
     CoralDb, DatabaseConfig, ResolvedDatabaseConfig, import_filesystem_feedback_reports,
-    run_state_migrations,
+    import_legacy_credential_material, run_state_migrations,
 };
 use crate::state::{AppStateLayout, ConfigStore};
 use crate::task::manager::TaskManager;
@@ -414,6 +414,7 @@ impl ServerBuilder {
         let active_trace_store_dir = active_trace_store.as_ref().map(|store| store.dir.clone());
         import_filesystem_feedback_reports(&coral_db, &layout).await?;
         let credential_store = init_credential_store(&layout, &coral_db)?;
+        import_legacy_credential_material(coral_db.as_ref(), &layout, &credential_store).await?;
         let credential_manager = CredentialManager::new(credential_store);
         let workspace_lifecycle_lock = WorkspaceLifecycleLock::default();
         let workspace_pool_registry = Arc::new(WorkspacePoolRegistry::default());
