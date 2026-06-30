@@ -411,8 +411,16 @@ impl ServerBuilder {
         let coral_db = Arc::new(coral_db);
         let (telemetry_config, active_trace_store) =
             init_server_telemetry(&layout, self.config.enable_stderr_logs)?;
+        let sync_trace_store = active_trace_store.clone();
         let active_trace_store_dir = active_trace_store.as_ref().map(|store| store.dir.clone());
         import_filesystem_feedback_reports(&coral_db, &layout).await?;
+        if let Some(store) = sync_trace_store.as_ref() {
+            TraceService::sync_summaries(store.dir.clone(), store.retention, coral_db.as_ref())
+                .await
+                .map_err(|error| {
+                    AppError::Database(format!("trace summary import failed: {error}"))
+                })?;
+        }
         let credential_store = init_credential_store(&layout, &coral_db)?;
         import_legacy_credential_material(coral_db.as_ref(), &layout, &credential_store).await?;
         let credential_manager = CredentialManager::new(credential_store);
@@ -481,7 +489,7 @@ impl ServerBuilder {
             CatalogDiscovery::new(query_manager.clone()),
             workspace_lifecycle_lock,
         );
-        let trace_components = trace_components_for_store(active_trace_store);
+        let trace_components = trace_components_for_store(active_trace_store, &coral_db);
         start_server(
             ServerDependencies {
                 source: source_manager,
@@ -528,14 +536,16 @@ fn init_server_telemetry(
 
 fn trace_components_for_store(
     active_trace_store: Option<crate::telemetry::InstalledLocalTraceStore>,
+    db: &Arc<CoralDb>,
 ) -> TraceServerComponents {
     active_trace_store.map_or_else(TraceServerComponents::default, |store| {
         TraceServerComponents {
             local_trace_store_dir: Some(store.dir.clone()),
-            service: Some(TraceService::new(TraceManager::new(
+            service: Some(TraceService::with_db(
                 store.dir,
                 store.retention,
-            ))),
+                Arc::clone(db),
+            )),
         }
     })
 }
