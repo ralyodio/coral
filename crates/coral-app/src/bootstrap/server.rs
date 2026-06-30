@@ -63,7 +63,10 @@ use crate::search::service::SearchService;
 use crate::sources::manager::SourceManager;
 use crate::sources::materialization::SourceDiagnosticReporter;
 use crate::sources::service::SourceService;
-use crate::state::db::{CoralDb, DatabaseConfig, ResolvedDatabaseConfig, run_state_migrations};
+use crate::state::db::{
+    CoralDb, DatabaseConfig, ResolvedDatabaseConfig, import_filesystem_feedback_reports,
+    run_state_migrations,
+};
 use crate::state::{AppStateLayout, ConfigStore};
 use crate::task::manager::TaskManager;
 use crate::task::service::TaskService;
@@ -400,6 +403,7 @@ impl ServerBuilder {
         let (telemetry_config, active_trace_store) =
             init_server_telemetry(&layout, self.config.enable_stderr_logs)?;
         let active_trace_store_dir = active_trace_store.as_ref().map(|store| store.dir.clone());
+        import_filesystem_feedback_reports(&coral_db, &layout).await?;
         let credential_config = CredentialStorageConfig::load(&layout)?;
         let credential_store =
             CredentialStore::with_preference(layout.clone(), credential_config.storage);
@@ -428,8 +432,11 @@ impl ServerBuilder {
             diagnostic_reporter.clone(),
         )
         .with_pool_registry(Arc::clone(&workspace_pool_registry));
-        let feedback_manager =
-            FeedbackManager::with_publisher(layout.clone(), self.config.feedback_publisher);
+        let feedback_manager = FeedbackManager::with_db(
+            layout.clone(),
+            self.config.feedback_publisher,
+            Arc::clone(&coral_db),
+        );
         let task_manager = TaskManager::new(TaskStore::new(Arc::clone(&coral_db)));
         let task_activity = crate::task::activity::TaskActivityRecorder::new(Arc::clone(&coral_db));
         let body_capture_max_bytes = telemetry_config
