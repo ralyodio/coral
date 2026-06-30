@@ -34,8 +34,8 @@
   against Postgres, plus DB-backed service and source-lifecycle namespaces and
   the dedicated Postgres integration target. `postgres-tests` uses
   `CORAL_TEST_POSTGRES_URL` when supplied. Otherwise it starts a local Docker
-  Postgres and creates a fresh database inside the reusable container. Docker
-  chooses an available localhost port by default; use
+  Postgres and creates fresh suite and server-lifecycle databases inside the
+  reusable container. Docker chooses an available localhost port by default; use
   `make postgres-url` to print the server URL or
   `LOCAL_POSTGRES_PORT=55432 make postgres-start` when you need a stable port.
   Use `make postgres-start` when you only need the server,
