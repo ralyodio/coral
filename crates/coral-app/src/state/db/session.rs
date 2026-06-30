@@ -9,6 +9,7 @@ use super::{CoralDb, CoralTx, DbError};
 use crate::state::db::repositories::identity_specs::{
     IdentitySpecDocumentsRepo, IdentitySpecsRepo,
 };
+use crate::state::db::repositories::sources::SourcesRepo;
 use crate::state::db::repositories::state_migrations::StateMigrationsRepo;
 use crate::state::db::repositories::task_queries::TaskQueriesRepo;
 use crate::state::db::repositories::tasks::TasksRepo;
@@ -61,6 +62,17 @@ pub(crate) trait DbRepos: DbSession + Sized {
     #[cfg_attr(not(test), expect(dead_code, reason = "B2 wires production consumers"))]
     fn identity_spec_documents(&mut self) -> IdentitySpecDocumentsRepo<'_, Self> {
         IdentitySpecDocumentsRepo::new(self)
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "source catalog repository lands before manager wiring in the stacked PR sequence"
+        )
+    )]
+    fn sources(&mut self) -> SourcesRepo<'_, Self> {
+        SourcesRepo::new(self)
     }
 }
 
