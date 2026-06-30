@@ -33,7 +33,8 @@ use crate::query::input_resolver::{
 };
 use crate::search::observed::{SearchObservationHandle, SearchObservationSource};
 use crate::sources::catalog::{
-    resolve_installed_manifest, validate_imported_manifest_database_persistence,
+    load_bundled_source, resolve_installed_manifest_from_yaml,
+    validate_imported_manifest_database_persistence,
 };
 use crate::sources::materialization::{SourceDiagnosticReporter, SourceLoadDiagnosticStage};
 use crate::sources::model::{InstalledSource, SourceOrigin};
@@ -627,6 +628,7 @@ impl QueryManager {
                 .map_err(QueryManagerError::App)?;
             let (loaded_source, version) = self
                 .load_query_source(workspace_name, &source)
+                .await
                 .map_err(QueryManagerError::App)?;
             (source, loaded_source, version, config)
         };
@@ -658,7 +660,9 @@ impl QueryManager {
         let _state_lock = self.config_store.state_lock_shared()?;
         let config = self.config_store.load_config_unlocked()?;
         let installed_sources = self.installed_sources(workspace_name).await?;
-        let sources = self.load_query_sources_from_installed(workspace_name, installed_sources);
+        let sources = self
+            .load_query_sources_from_installed(workspace_name, installed_sources)
+            .await;
         Ok((sources, config))
     }
 
@@ -693,7 +697,34 @@ impl QueryManager {
             .map_err(AppError::from)
     }
 
-    fn load_query_sources_from_installed(
+    async fn resolve_source_manifest(
+        &self,
+        workspace_name: &WorkspaceName,
+        source: &InstalledSource,
+    ) -> Result<crate::sources::catalog::InstalledSourceManifest, AppError> {
+        let manifest_yaml = match source.origin {
+            crate::sources::model::SourceOrigin::Bundled => {
+                load_bundled_source(&source.name)?.manifest_yaml
+            }
+            crate::sources::model::SourceOrigin::Imported => {
+                let mut session = self.db.as_ref();
+                session
+                    .source_manifests()
+                    .get(workspace_name, &source.name)
+                    .await?
+                    .map(|record| record.manifest_yaml)
+                    .ok_or_else(|| {
+                        AppError::SourceNotFound(format!(
+                            "manifest for imported source '{workspace_name}:{}'",
+                            source.name
+                        ))
+                    })?
+            }
+        };
+        resolve_installed_manifest_from_yaml(source, &manifest_yaml)
+    }
+
+    async fn load_query_sources_from_installed(
         &self,
         workspace_name: &WorkspaceName,
         installed_sources: Vec<InstalledSource>,
@@ -707,30 +738,34 @@ impl QueryManager {
             coral_telemetry::WORKSPACE_SPAN_ATTRIBUTE,
             workspace_name.as_str(),
         );
-        let _guard = span.enter();
-        let mut loaded_sources = Vec::new();
-        let mut failed_source_names = BTreeSet::new();
-        for source in installed_sources {
-            match self.load_query_source(workspace_name, &source) {
-                Ok((loaded_source, _version)) => {
-                    self.diagnostic_reporter.clear_source_load_failure(
-                        SourceLoadDiagnosticStage::Query,
-                        workspace_name,
-                        &source.name,
-                    );
-                    loaded_sources.push(loaded_source);
-                }
-                Err(error) => {
-                    failed_source_names.insert(source.name.to_string());
-                    self.diagnostic_reporter.report_source_load_failure(
-                        SourceLoadDiagnosticStage::Query,
-                        workspace_name,
-                        &source.name,
-                        &error.to_string(),
-                    );
+        let (loaded_sources, failed_source_names) = async {
+            let mut loaded_sources = Vec::new();
+            let mut failed_source_names = BTreeSet::new();
+            for source in installed_sources {
+                match self.load_query_source(workspace_name, &source).await {
+                    Ok((loaded_source, _version)) => {
+                        self.diagnostic_reporter.clear_source_load_failure(
+                            SourceLoadDiagnosticStage::Query,
+                            workspace_name,
+                            &source.name,
+                        );
+                        loaded_sources.push(loaded_source);
+                    }
+                    Err(error) => {
+                        failed_source_names.insert(source.name.to_string());
+                        self.diagnostic_reporter.report_source_load_failure(
+                            SourceLoadDiagnosticStage::Query,
+                            workspace_name,
+                            &source.name,
+                            &error.to_string(),
+                        );
+                    }
                 }
             }
+            (loaded_sources, failed_source_names)
         }
+        .instrument(span.clone())
+        .await;
         span.record("source.count", loaded_sources.len());
         QuerySourceLoad {
             loaded: loaded_sources,
@@ -738,12 +773,12 @@ impl QueryManager {
         }
     }
 
-    fn load_query_source(
+    async fn load_query_source(
         &self,
         workspace_name: &WorkspaceName,
         source: &InstalledSource,
     ) -> Result<(LoadedQuerySource, Option<String>), AppError> {
-        let installed = resolve_installed_manifest(workspace_name, source, &self.layout)?;
+        let installed = self.resolve_source_manifest(workspace_name, source).await?;
         let source_spec = &installed.source_spec;
         ensure_database_source_feature_enabled(source_spec, self.database_sources_enabled)?;
         if source.origin == SourceOrigin::Imported {
@@ -1038,8 +1073,9 @@ impl QueryManager {
                 .config_store
                 .load_config_unlocked()
                 .map_err(QueryManagerError::App)?;
-            let source_load =
-                self.load_query_sources_from_installed(workspace_name, installed_sources);
+            let source_load = self
+                .load_query_sources_from_installed(workspace_name, installed_sources)
+                .await;
             (source_load.loaded, config)
         };
         Ok((loaded_sources, config))
@@ -1692,6 +1728,15 @@ mod tests {
         workspace_name: &WorkspaceName,
         source: &InstalledSource,
     ) {
+        upsert_test_source_with_manifest(db, workspace_name, source, None).await;
+    }
+
+    async fn upsert_test_source_with_manifest(
+        db: &Arc<CoralDb>,
+        workspace_name: &WorkspaceName,
+        source: &InstalledSource,
+        manifest_yaml: Option<&str>,
+    ) {
         let mut tx = db.begin().await.expect("begin test source tx");
         tx.workspaces()
             .ensure(workspace_name.as_str(), 11)
@@ -1701,6 +1746,12 @@ mod tests {
             .upsert_source(workspace_name, source, 11)
             .await
             .expect("upsert test source");
+        if let Some(manifest_yaml) = manifest_yaml {
+            tx.source_manifests()
+                .upsert(workspace_name, &source.name, manifest_yaml, 11)
+                .await
+                .expect("upsert test source manifest");
+        }
         tx.commit().await.expect("commit test source");
     }
 
@@ -2521,15 +2572,7 @@ select text from function_demo.messages
         fixture.manager.layout.ensure().expect("ensure layout");
         let workspace_name = WorkspaceName::default();
         let source_name = SourceName::parse("optional_auth").expect("source name");
-        let manifest_path = fixture
-            .manager
-            .layout
-            .manifest_file(&workspace_name, &source_name);
-        std::fs::create_dir_all(manifest_path.parent().expect("manifest parent"))
-            .expect("create source dir");
-        std::fs::write(
-            &manifest_path,
-            r"
+        let manifest_yaml = r"
 name: optional_auth
 version: 0.1.0
 dsl_version: 3
@@ -2560,9 +2603,7 @@ tables:
     columns:
       - name: id
         type: Utf8
-",
-        )
-        .expect("write manifest");
+";
         let source = InstalledSource {
             name: source_name.clone(),
             version: Some("0.1.0".to_string()),
@@ -2572,11 +2613,13 @@ tables:
             credential_revision: uuid::Uuid::default(),
             origin: SourceOrigin::Imported,
         };
-        fixture
-            .manager
-            .config_store
-            .upsert_source(&workspace_name, source.clone())
-            .expect("persist source");
+        upsert_test_source_with_manifest(
+            &fixture.manager.db,
+            &workspace_name,
+            &source,
+            Some(manifest_yaml),
+        )
+        .await;
         fixture
             .manager
             .credential_manager
@@ -2591,6 +2634,7 @@ tables:
         let (loaded_source, _) = fixture
             .manager
             .load_query_source(&workspace_name, &source)
+            .await
             .expect("optional secret should load when present");
 
         assert_eq!(
@@ -2755,15 +2799,7 @@ tables:
         fixture.manager.layout.ensure().expect("ensure layout");
         let workspace_name = WorkspaceName::default();
         let source_name = SourceName::parse("transport_guard").expect("source name");
-        let manifest_path = fixture
-            .manager
-            .layout
-            .manifest_file(&workspace_name, &source_name);
-        std::fs::create_dir_all(manifest_path.parent().expect("manifest parent"))
-            .expect("create source dir");
-        std::fs::write(
-            &manifest_path,
-            r#"
+        let manifest_yaml = r#"
 name: transport_guard
 version: 0.1.0
 dsl_version: 3
@@ -2788,9 +2824,7 @@ tables:
     columns:
       - name: id
         type: Utf8
-"#,
-        )
-        .expect("write manifest");
+"#;
         let source = InstalledSource {
             name: source_name.clone(),
             version: Some("0.1.0".to_string()),
@@ -2803,10 +2837,18 @@ tables:
             credential_revision: uuid::Uuid::default(),
             origin: SourceOrigin::Imported,
         };
+        upsert_test_source_with_manifest(
+            &fixture.manager.db,
+            &workspace_name,
+            &source,
+            Some(manifest_yaml),
+        )
+        .await;
 
         let error = fixture
             .manager
             .load_query_source(&workspace_name, &source)
+            .await
             .expect_err("persisted imported cleartext credential endpoint should fail");
 
         assert!(error.to_string().contains("base_url must use https"));
@@ -3022,6 +3064,7 @@ surface:
         let error = fixture
             .manager
             .load_query_source(&workspace_name, &source)
+            .await
             .expect_err("identity-gated source must fail closed");
 
         assert!(matches!(
@@ -3483,20 +3526,13 @@ tables:
         workspace_name: &WorkspaceName,
     ) -> SourceName {
         let source_name = SourceName::parse("github_v4_missing_artifacts").expect("source name");
-        let manifest_path = manager.layout.manifest_file(workspace_name, &source_name);
-        std::fs::create_dir_all(manifest_path.parent().expect("manifest parent"))
-            .expect("create source dir");
-        std::fs::write(
-            &manifest_path,
-            r"
+        let manifest_yaml = r"
 name: github_v4_missing_artifacts
 dsl_version: 4
 surface:
     type: openapi
     url: https://example.com/openapi.yaml
-",
-        )
-        .expect("write manifest");
+";
         let source = InstalledSource {
             name: source_name.clone(),
             version: None,
@@ -3506,7 +3542,8 @@ surface:
             credential_revision: uuid::Uuid::default(),
             origin: SourceOrigin::Imported,
         };
-        upsert_test_source(&manager.db, workspace_name, &source).await;
+        upsert_test_source_with_manifest(&manager.db, workspace_name, &source, Some(manifest_yaml))
+            .await;
         source_name
     }
 
@@ -3521,12 +3558,7 @@ surface:
             .expect("write corrupt parquet");
 
         let source_name = SourceName::parse("corrupt_parquet").expect("source name");
-        let manifest_path = manager.layout.manifest_file(workspace_name, &source_name);
-        std::fs::create_dir_all(manifest_path.parent().expect("manifest parent"))
-            .expect("create source dir");
-        std::fs::write(
-            &manifest_path,
-            r#"
+        let manifest_yaml = r#"
 name: corrupt_parquet
 version: 0.1.0
 dsl_version: 3
@@ -3539,10 +3571,8 @@ tables:
       location: file://~/corrupt-parquet/
       glob: "**/*.parquet"
     columns: []
-"#,
-        )
-        .expect("write manifest");
-        upsert_test_source(
+"#;
+        upsert_test_source_with_manifest(
             &manager.db,
             workspace_name,
             &InstalledSource {
@@ -3554,6 +3584,7 @@ tables:
                 credential_revision: uuid::Uuid::default(),
                 origin: SourceOrigin::Imported,
             },
+            Some(manifest_yaml),
         )
         .await;
         source_name
@@ -4037,14 +4068,7 @@ tables:
             credential_revision: uuid::Uuid::new_v4(),
             origin: SourceOrigin::Imported,
         };
-        std::fs::create_dir_all(fixture.manager.layout.source_dir(&workspace, &source_name))
-            .expect("source directory");
-        std::fs::write(
-            fixture
-                .manager
-                .layout
-                .manifest_file(&workspace, &source_name),
-            r"
+        let manifest_yaml = r"
 name: secured_messages
 version: 0.1.0
 dsl_version: 3
@@ -4061,15 +4085,14 @@ tables:
     columns:
       - name: id
         type: Utf8
-",
+";
+        upsert_test_source_with_manifest(
+            &fixture.manager.db,
+            &workspace,
+            &installed_source,
+            Some(manifest_yaml),
         )
-        .expect("write manifest");
-        fixture
-            .manager
-            .config_store
-            .upsert_source(&workspace, installed_source.clone())
-            .expect("persist source");
-        upsert_test_source(&fixture.manager.db, &workspace, &installed_source).await;
+        .await;
         fixture
             .manager
             .credential_manager
@@ -4083,6 +4106,7 @@ tables:
         let first = fixture
             .manager
             .load_query_source(&workspace, &installed_source)
+            .await
             .expect("first runtime")
             .0;
 
@@ -4099,6 +4123,7 @@ tables:
         let refreshed = fixture
             .manager
             .load_query_source(&workspace, &installed_source)
+            .await
             .expect("refreshed runtime")
             .0;
 
