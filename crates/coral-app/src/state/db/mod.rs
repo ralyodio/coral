@@ -20,10 +20,6 @@ pub(crate) use config::{DatabaseConfig, ResolvedDatabaseConfig};
 pub(crate) use coral_db::CoralDb;
 pub(crate) use error::DbError;
 pub(crate) use import::{import_filesystem_feedback_reports, run_state_migrations};
-#[expect(
-    unused_imports,
-    reason = "Credential runtime branches consume these once restacked."
-)]
 pub(crate) use repositories::credential_documents::{
     CredentialDocumentRecord, CredentialDocumentWrite,
 };
