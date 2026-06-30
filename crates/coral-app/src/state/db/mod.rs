@@ -27,6 +27,9 @@ pub(crate) use import::run_state_migrations;
 pub(crate) use repositories::identity_specs::{
     IdentitySpecDocumentRecord, IdentitySpecKey, IdentitySpecRecord, IdentitySpecScope,
 };
+pub(crate) use repositories::materializations::{
+    MaterializationRecord, MaterializationSurfaceRecord,
+};
 pub(crate) use repositories::tasks::{TaskCompletionUpdate, TaskLifecycleState};
 pub(crate) use session::{DbRepos, DbSession};
 #[cfg(test)]
