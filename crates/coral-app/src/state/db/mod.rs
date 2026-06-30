@@ -22,6 +22,11 @@ pub(crate) use error::DbError;
 pub(crate) use import::run_state_migrations;
 #[expect(
     unused_imports,
+    reason = "Feedback runtime branches import this from the state::db boundary once restacked."
+)]
+pub(crate) use repositories::feedback_reports::FeedbackReportRecord;
+#[expect(
+    unused_imports,
     reason = "identity persistence types are not yet wired to production consumers"
 )]
 pub(crate) use repositories::identity_specs::{
