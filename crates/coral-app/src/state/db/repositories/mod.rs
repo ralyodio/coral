@@ -1,4 +1,5 @@
 pub(crate) mod identity_specs;
+pub(crate) mod materializations;
 pub(crate) mod source_manifests;
 pub(crate) mod sources;
 pub(crate) mod state_migrations;
