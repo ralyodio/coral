@@ -28,7 +28,7 @@ pub(crate) use repositories::identity_specs::{
     IdentitySpecDocumentRecord, IdentitySpecKey, IdentitySpecRecord, IdentitySpecScope,
 };
 pub(crate) use repositories::tasks::{TaskCompletionUpdate, TaskLifecycleState};
-pub(crate) use session::{DbRepos, DbSession};
+pub(crate) use session::{DbRepos, DbSession, DbWriteSession};
 #[cfg(test)]
 pub(crate) use task_query_state::TaskQueryRelationRecord;
 pub(crate) use task_query_state::{TaskQueryRelationWrite, TaskQueryWrite, TaskQueryWriteResult};
