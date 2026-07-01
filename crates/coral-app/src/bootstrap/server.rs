@@ -1006,6 +1006,7 @@ mod tests {
     )]
 
     use std::borrow::Cow;
+    use std::collections::BTreeMap;
     use std::future::Future as _;
     use std::net::{Ipv4Addr, SocketAddr, TcpListener};
     use std::path::Path;
@@ -1045,8 +1046,12 @@ mod tests {
         ObservedValuesQueueJob, ObservedValuesSurfaceKind, SearchObservationHandle,
         SqliteObservedValuesStore,
     };
+    use crate::sources::SourceName;
     use crate::sources::manager::SourceManager;
-    use crate::state::db::{CoralDb, DatabaseConfig, ResolvedDatabaseConfig, run_state_migrations};
+    use crate::sources::model::{InstalledSource, SourceOrigin};
+    use crate::state::db::{
+        CoralDb, DatabaseConfig, DbRepos, ResolvedDatabaseConfig, run_state_migrations,
+    };
     use crate::state::{AppStateLayout, ConfigStore};
     use crate::task::manager::TaskManager;
     use crate::task::store::TaskStore;
@@ -1716,6 +1721,56 @@ backend = "unsupported"
                 .pending_queue_job_count(&workspace)
                 .expect("pending queue depth"),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_imports_legacy_config_source_catalog_into_database() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_dir = temp.path().join("coral-config");
+        let layout = AppStateLayout::discover(Some(config_dir.clone())).expect("layout");
+        layout.ensure().expect("layout dirs");
+        disable_internal_tracing(&config_dir);
+
+        let workspace = WorkspaceName::default();
+        let source = InstalledSource {
+            name: SourceName::parse("github").expect("source name"),
+            version: Some("1.2.3".to_string()),
+            variables: BTreeMap::from([(
+                "GITHUB_API_BASE".to_string(),
+                "https://api.github.com".to_string(),
+            )]),
+            secrets: vec!["GITHUB_TOKEN".to_string()],
+            credential_storage: None,
+            origin: SourceOrigin::Bundled,
+        };
+        ConfigStore::new(layout.clone())
+            .upsert_source(&workspace, source.clone())
+            .expect("seed legacy config source");
+
+        let server = ServerBuilder::new()
+            .with_config_dir(config_dir)
+            .start()
+            .await
+            .expect("start server");
+        server.shutdown().await.expect("shutdown");
+
+        let DatabaseConfig::Sqlite { path } =
+            DatabaseConfig::load(&layout).expect("load database config")
+        else {
+            panic!("default test config should be sqlite");
+        };
+        let db = CoralDb::open(ResolvedDatabaseConfig::Sqlite { path })
+            .await
+            .expect("open sqlite");
+        let mut session = &db;
+        assert_eq!(
+            session
+                .sources()
+                .get_source(&workspace, &source.name)
+                .await
+                .expect("get imported source"),
+            Some(source)
         );
     }
 
