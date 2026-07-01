@@ -6,6 +6,7 @@ use tracing::warn;
 use crate::bootstrap::AppError;
 use crate::credentials::{CredentialManager, CredentialSetId};
 use crate::sources::materialization::SourceDiagnosticReporter;
+use crate::sources::model::InstalledSource;
 use crate::state::ConfigStore;
 use crate::state::db::{CoralDb, DbRepos, now_unix_nanos_i64};
 use crate::storage::fs::DirectoryBackup;
@@ -182,6 +183,17 @@ impl WorkspaceManager {
             // two processes sharing one config directory deadlock across the
             // file lock and the database.
             let state_lock = self.config_store.state_lock_exclusive()?;
+            // Captured before the deletion transaction removes the workspace row,
+            // which cascades the source rows away. The exclusive state lock is
+            // already held, so the catalog cannot change between this read and
+            // the delete.
+            let db_sources = {
+                let mut session = self.db.as_ref();
+                session
+                    .sources()
+                    .list_workspace_sources(workspace_name)
+                    .await?
+            };
             let Some(deletion) = self
                 .db
                 .begin_workspace_deletion(workspace_name.as_str())
@@ -209,6 +221,7 @@ impl WorkspaceManager {
                     return Err(error);
                 }
             };
+            let deleted = Self::merge_deleted_sources(deleted, db_sources);
             deletion.commit().await?;
             self.pool_registry.remove(workspace_name);
             // Credential cleanup re-acquires the state lock through the file
@@ -228,6 +241,22 @@ impl WorkspaceManager {
         self.prune_deleted_workspace_traces(&deleted_workspace_name)
             .await;
         Ok(deleted.workspace)
+    }
+
+    fn merge_deleted_sources(
+        mut deleted: DeletedWorkspace,
+        db_sources: Vec<InstalledSource>,
+    ) -> DeletedWorkspace {
+        for source in db_sources {
+            if !deleted
+                .sources
+                .iter()
+                .any(|existing| existing.name == source.name)
+            {
+                deleted.sources.push(source);
+            }
+        }
+        deleted
     }
 
     fn remove_deleted_workspace_credentials(&self, deleted: &DeletedWorkspace) {

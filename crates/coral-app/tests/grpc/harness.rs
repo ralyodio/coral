@@ -23,7 +23,7 @@ pub(crate) struct GrpcHarness {
     config_dir: PathBuf,
     local_trace_store_dir: Option<PathBuf>,
     app: AppClient,
-    _server: RunningServer,
+    server: RunningServer,
 }
 
 pub(crate) struct FailingHttpFixture {
@@ -65,6 +65,19 @@ impl GrpcHarness {
         .await
     }
 
+    pub(crate) async fn shutdown(self) {
+        let Self {
+            temp_dir,
+            config_dir,
+            local_trace_store_dir,
+            app,
+            server,
+        } = self;
+        drop(app);
+        server.shutdown().await.expect("shutdown server");
+        drop((temp_dir, config_dir, local_trace_store_dir));
+    }
+
     async fn start_with_parts(
         temp_dir: TempDir,
         config_dir: PathBuf,
@@ -101,7 +114,7 @@ impl GrpcHarness {
             config_dir,
             local_trace_store_dir,
             app,
-            _server: server,
+            server,
         }
     }
 

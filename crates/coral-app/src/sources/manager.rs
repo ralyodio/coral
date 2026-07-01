@@ -182,6 +182,7 @@ struct OAuthSourceInstallRequest {
 }
 
 struct SourceRollbackState {
+    credential_revision: Uuid,
     manifest_yaml: Option<String>,
     credential_material: Option<CredentialMaterialSnapshot>,
 }
@@ -685,6 +686,7 @@ impl SourceManager {
             .map(|storage| credential_guard.snapshot_material_with_state_lock_held(storage))
             .transpose()?;
         let previous = SourceRollbackState {
+            credential_revision: stored.credential_revision,
             manifest_yaml: match removed.origin {
                 SourceOrigin::Bundled => None,
                 SourceOrigin::Imported => Some(std::fs::read_to_string(
@@ -788,7 +790,7 @@ impl SourceManager {
             self.load_source_rollback_state(workspace_name, &source_name, &credential_guard)?;
         let previous_credential_revision = previous
             .as_ref()
-            .map(|state| state.source.credential_revision)
+            .map(|state| state.credential_revision)
             .unwrap_or_default();
         let is_new_install = previous.is_none();
         if let Err(error) =
@@ -1415,6 +1417,7 @@ impl SourceManager {
             })
             .transpose()?;
         Ok(Some(SourceRollbackState {
+            credential_revision: source.credential_revision,
             manifest_yaml: match source.origin {
                 SourceOrigin::Bundled => None,
                 SourceOrigin::Imported => Some(std::fs::read_to_string(
@@ -3707,13 +3710,15 @@ surface:
                 },
             )
             .expect("install source");
+        let db = rusqlite::Connection::open(layout.database_file()).expect("open db");
+        db.execute_batch(
+            "CREATE TRIGGER fail_upsert BEFORE INSERT ON source_variables
+                 BEGIN SELECT RAISE(FAIL, 'injected failure'); END;",
+        )
+        .expect("install failure trigger");
         let refresh_lock = credential_store
             .credential_refresh_lock(&workspace_name, &credential_set_id)
             .expect("hold refresh lock");
-        let config_temp_path = layout
-            .config_file()
-            .with_file_name(format!("config.toml.tmp.{}", std::process::id()));
-        std::fs::create_dir_all(&config_temp_path).expect("block config save temp path");
         let (started_tx, started_rx) = std_mpsc::channel();
         let import_manager = manager.clone();
         let import_workspace = workspace_name.clone();
@@ -3753,8 +3758,8 @@ surface:
         import_handle
             .join()
             .expect("import thread")
-            .expect_err("blocked config save should fail import");
-        drop(std::fs::remove_dir_all(&config_temp_path));
+            .expect_err("blocked database write should fail import");
+        drop(db);
 
         let material = credential_manager
             .read_material(
