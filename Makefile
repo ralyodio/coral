@@ -94,7 +94,7 @@ perf-check:
 # ----------------------------------------------------------------------------
 # Postgres-backed tests
 # ----------------------------------------------------------------------------
-# postgres-test-suite runs the DB-owned coral-app unit tests and dedicated
+# postgres-test-suite runs DB-backed coral-app test namespaces and the dedicated
 # Postgres integration target against an existing Postgres URL. postgres-tests
 # provisions the database first: when CORAL_TEST_POSTGRES_URL is set it uses
 # that database, otherwise it starts a Docker Postgres matching CI's major
@@ -168,7 +168,7 @@ postgres-clean:
 # containing $(MAKE) even under -n/-t/-q, and the postgres-tests recipe is a
 # single continued line, so an inline sub-make would make
 # `make -n postgres-tests` execute the real suite.
-POSTGRES_SUITE_CARGO = cargo test --locked -p coral-app --lib 'state::db::' -- --test-threads=1 && cargo test --locked -p coral-app --test grpc 'source_lifecycle_tests::' && cargo test --locked -p coral-app --test postgres_database_tests
+POSTGRES_SUITE_CARGO = cargo test --locked -p coral-app --lib 'state::db::' -- --test-threads=1 && cargo test --locked -p coral-app --lib 'telemetry::service::tests::' && cargo test --locked -p coral-app --test grpc 'source_lifecycle_tests::' && cargo test --locked -p coral-app --test postgres_database_tests
 
 postgres-test-suite:
 	@test -n "$${CORAL_TEST_POSTGRES_URL:-}" || \
