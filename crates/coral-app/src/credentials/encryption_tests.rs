@@ -6,6 +6,7 @@ use ring::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey};
 use tempfile::tempdir;
 
 use super::CredentialsError;
+use super::config::CredentialEncryptionKeySource;
 use super::encryption::{
     CREDENTIAL_DOCUMENT_AAD_VERSION, CredentialEncryptionKey, CredentialKeyProvider,
     LocalFileCredentialKeyProvider, decrypt_credential_values, encrypt_credential_values,
@@ -395,7 +396,7 @@ fn assert_open_failed(error: &CredentialsError) {
 }
 
 fn local_file_key_provider(layout: &AppStateLayout) -> LocalFileCredentialKeyProvider {
-    LocalFileCredentialKeyProvider::new(layout, None)
+    LocalFileCredentialKeyProvider::with_source(layout, None, CredentialEncryptionKeySource::File)
 }
 
 fn current_dek_aad_for_test(key_id: &str) -> Vec<u8> {
