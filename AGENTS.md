@@ -31,8 +31,8 @@
   `postgres-test-suite` as the single home for the suite's Cargo invocations;
   do not duplicate them in workflows or contributor instructions. The suite runs
   the `state::db` unit-test namespace, repeating shared repository assertions
-  against Postgres, then runs the dedicated Postgres integration target for
-  migration and server startup coverage. `postgres-tests` uses
+  against Postgres, then runs the source-lifecycle integration namespace and the
+  dedicated Postgres integration target. `postgres-tests` uses
   `CORAL_TEST_POSTGRES_URL` when supplied. Otherwise it starts a local Docker
   Postgres and creates a fresh database inside the reusable container. Docker
   chooses an available localhost port by default; use

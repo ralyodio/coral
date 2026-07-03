@@ -44,10 +44,6 @@ impl CoralDb {
         Ok(())
     }
 
-    #[expect(
-        dead_code,
-        reason = "database credential bootstrap uses this in the next stacked branch"
-    )]
     pub(crate) fn is_postgres(&self) -> bool {
         matches!(self.backend, CoralDbBackend::Postgres(_))
     }
