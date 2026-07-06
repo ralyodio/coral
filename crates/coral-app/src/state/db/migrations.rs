@@ -75,9 +75,7 @@ mod tests {
     use super::{MIGRATOR, rows_match_current_migrations};
     use crate::state::AppStateLayout;
     use crate::state::db::schema::{SourceSecretKeys, SourceVariables, Sources, Workspaces};
-    use crate::state::db::{
-        CoralDb, DatabaseConfig, DbError, DbSession, DbWriteSession, ResolvedDatabaseConfig,
-    };
+    use crate::state::db::{CoralDb, DatabaseConfig, DbError, DbSession, ResolvedDatabaseConfig};
 
     #[test]
     fn current_migration_rows_must_match_versions_checksums_and_success() {
@@ -419,7 +417,7 @@ mod tests {
         source_name: &str,
     ) -> Result<(), DbError>
     where
-        S: DbWriteSession,
+        S: DbSession,
     {
         session
             .execute(
@@ -434,7 +432,7 @@ mod tests {
 
     async fn delete_workspace<S>(session: &mut S, workspace_id: &str) -> Result<(), DbError>
     where
-        S: DbWriteSession,
+        S: DbSession,
     {
         session
             .execute(
@@ -530,11 +528,10 @@ mod tests {
         S: DbSession,
     {
         Ok(session
-            .fetch_all::<(i64,)>(statement)
+            .fetch_all_scalars::<i64>(statement)
             .await?
             .into_iter()
             .next()
-            .expect("count row")
-            .0)
+            .expect("count row"))
     }
 }
