@@ -155,9 +155,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "set CORAL_TEST_POSTGRES_URL to run migration contract coverage against Postgres"]
     async fn source_catalog_migration_contract_against_postgres() {
-        let Some(url) = bootstrap::env_var("CORAL_TEST_POSTGRES_URL")
-            .expect("CORAL_TEST_POSTGRES_URL must contain valid UTF-8")
-        else {
+        let Some(url) = postgres_test_url() else {
             return;
         };
         let db = CoralDb::open(ResolvedDatabaseConfig::Postgres { url })
@@ -259,7 +257,7 @@ mod tests {
         insert_source_row(session, workspace_id, source_name).await?;
         insert_source_variable_row(session, workspace_id, source_name, "REGION", "us-east-1")
             .await?;
-        insert_source_secret_key_row(session, workspace_id, source_name, 0, "API_TOKEN").await
+        insert_source_secret_key_row(session, workspace_id, source_name, "API_TOKEN").await
     }
 
     async fn assert_source_catalog_uniqueness_contract<S>(
@@ -282,10 +280,16 @@ mod tests {
             "duplicate source variable key should fail"
         );
         assert!(
-            insert_source_secret_key_row(session, workspace_id, source_name, 0, "OTHER_TOKEN")
+            insert_source_secret_key_row(session, workspace_id, source_name, "OTHER_TOKEN")
+                .await
+                .is_ok(),
+            "distinct source secret keys should be allowed"
+        );
+        assert!(
+            insert_source_secret_key_row(session, workspace_id, source_name, "API_TOKEN")
                 .await
                 .is_err(),
-            "duplicate source secret key position should fail"
+            "duplicate source secret key should fail"
         );
     }
 
@@ -375,7 +379,6 @@ mod tests {
         session: &mut S,
         workspace_id: &str,
         source_name: &str,
-        position: i32,
         key: &str,
     ) -> Result<(), DbError>
     where
@@ -388,13 +391,11 @@ mod tests {
                     .columns([
                         SourceSecretKeys::WorkspaceId,
                         SourceSecretKeys::SourceName,
-                        SourceSecretKeys::Position,
                         SourceSecretKeys::Key,
                     ])
                     .values_panic([
                         Expr::val(workspace_id),
                         Expr::val(source_name),
-                        Expr::val(position),
                         Expr::val(key),
                     ])
                     .to_owned(),
@@ -494,5 +495,11 @@ mod tests {
             .await?
             .expect("count row");
         Ok(row.count)
+    }
+
+    fn postgres_test_url() -> Option<String> {
+        bootstrap::env_var("CORAL_TEST_POSTGRES_URL")
+            .expect("CORAL_TEST_POSTGRES_URL must contain valid UTF-8")
+            .filter(|value| !value.is_empty())
     }
 }
