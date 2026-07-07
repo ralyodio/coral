@@ -443,12 +443,10 @@ mod tests {
             .expect("delete workspace");
 
         assert_eq!(deleted.name, workspace_name);
-        assert!(
-            store
-                .list_workspace_sources(&workspace_name)
-                .expect("list source definitions")
-                .is_empty()
-        );
+        assert!(matches!(
+            store.get_source(&workspace_name, &source_name),
+            Err(crate::bootstrap::AppError::SourceNotFound(_))
+        ));
         assert!(
             !layout.workspace_dir(&workspace_name).exists(),
             "workspace artifact directory should be removed after config commit"
