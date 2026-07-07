@@ -407,7 +407,7 @@ mod tests {
         let pool_registry_before_delete = pool_registry.for_workspace(&workspace_name);
         let source = installed_source("github");
         let source_name = source.name.clone();
-        let credential_set_id = CredentialSetId::for_source(&source.name);
+        let credential_set_id = CredentialSetId::for_source(&source_name);
 
         manager
             .create_workspace(&workspace_name)

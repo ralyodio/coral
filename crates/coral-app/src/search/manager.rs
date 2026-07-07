@@ -1,6 +1,7 @@
 //! App-level Universal Search manager.
 
 use std::future::Future;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use opentelemetry::trace::Status as OtelStatus;
@@ -37,6 +38,7 @@ use crate::search::sqlite_store::{
     SqliteSearchCompactionResult, SqliteSearchError, SqliteSearchStore,
 };
 use crate::sources::materialization::SourceDiagnosticReporter;
+use crate::state::db::CoralDb;
 use crate::state::{AppStateLayout, ConfigStore};
 use crate::task::id::TaskId;
 use crate::telemetry::{app_error_type, record_local_only_span_attribute};
@@ -83,6 +85,7 @@ impl SearchManager {
         layout: AppStateLayout,
         config_store: &ConfigStore,
         workspace_manager: WorkspaceManager,
+        db: Arc<CoralDb>,
         observed_values_search_enabled: bool,
         catalog_discovery: CatalogDiscovery,
         lifecycle_lock: WorkspaceLifecycleLock,
@@ -91,6 +94,7 @@ impl SearchManager {
             layout,
             config_store,
             workspace_manager,
+            db,
             observed_values_search_enabled,
             SourceDiagnosticReporter::default(),
             catalog_discovery,
@@ -102,6 +106,7 @@ impl SearchManager {
         layout: AppStateLayout,
         config_store: &ConfigStore,
         workspace_manager: WorkspaceManager,
+        db: Arc<CoralDb>,
         observed_values_search_enabled: bool,
         diagnostic_reporter: SourceDiagnosticReporter,
         catalog_discovery: CatalogDiscovery,
@@ -117,6 +122,7 @@ impl SearchManager {
         let observed_scope_loader = ObservedValuesLiveScopeLoader::new(
             layout.clone(),
             config_store.clone(),
+            db,
             diagnostic_reporter,
         );
         Self {
@@ -164,20 +170,11 @@ impl SearchManager {
                     else {
                         continue;
                     };
-                    let (observed_values_policy, lifecycle_lease) =
-                        if self.observed_values_search_enabled {
-                            let search = self.clone();
-                            let workspace_name = request.workspace_name.clone();
-                            run_blocking_search_operation(move || {
-                                Ok((
-                                    Some(search.observed_retrieval_policy(&workspace_name)),
-                                    lifecycle_lease,
-                                ))
-                            })
-                            .await?
-                        } else {
-                            (None, lifecycle_lease)
-                        };
+                    let observed_values_policy = if self.observed_values_search_enabled {
+                        Some(self.observed_retrieval_policy(&request.workspace_name).await)
+                    } else {
+                        None
+                    };
                     let context = SearchExecutionContext::new(
                         request_started_at,
                         lifecycle_lease,
@@ -246,6 +243,18 @@ impl SearchManager {
             else {
                 continue;
             };
+            let observed_policy = match request.provider {
+                SearchIndexProvider::Catalog => None,
+                SearchIndexProvider::ObservedValues | SearchIndexProvider::All
+                    if self.observed_values_search_enabled =>
+                {
+                    Some(
+                        self.observed_retrieval_policy(&request.workspace_name)
+                            .await,
+                    )
+                }
+                SearchIndexProvider::ObservedValues | SearchIndexProvider::All => None,
+            };
             let search = self.clone();
             let request = request.clone();
             let response = run_blocking_search_operation(move || {
@@ -263,7 +272,10 @@ impl SearchManager {
                         )?,
                     ],
                     SearchIndexProvider::ObservedValues => {
-                        vec![search.rebuild_observed_index(&request)]
+                        vec![search.rebuild_observed_index(
+                            &request,
+                            observed_policy.as_ref().map(Result::as_ref),
+                        )]
                     }
                     SearchIndexProvider::All => vec![
                         search.rebuild_catalog_index(
@@ -272,7 +284,10 @@ impl SearchManager {
                                 .as_ref()
                                 .expect("catalog rebuild preloads the catalog resolution"),
                         )?,
-                        search.rebuild_observed_index(&request),
+                        search.rebuild_observed_index(
+                            &request,
+                            observed_policy.as_ref().map(Result::as_ref),
+                        ),
                     ],
                 };
                 Ok(RebuildSearchIndexResponse { results })
@@ -519,26 +534,36 @@ impl SearchManager {
     fn rebuild_observed_index(
         &self,
         request: &RebuildSearchIndexRequest,
+        observed_policy: Option<Result<&ObservedValuesRetrievalPolicy, &AppError>>,
     ) -> SearchMaintenanceResult {
         if !self.observed_values_search_enabled {
             return observed_values_search_disabled_maintenance_result();
         }
-        match self.try_rebuild_observed_index(request) {
+        let policy = match observed_policy {
+            Some(Ok(policy)) => policy,
+            Some(Err(error)) => return observed_rebuild_error_provider_result(error),
+            None => {
+                return observed_rebuild_error_provider_result(&AppError::Internal(
+                    "observed-value retrieval policy was not loaded for rebuild".to_string(),
+                ));
+            }
+        };
+        match self.try_rebuild_observed_index(request, policy) {
             Ok(result) => result,
-            Err(error) => observed_rebuild_error_provider_result(&error),
+            Err(SearchManagerError::App(error)) => observed_rebuild_error_provider_result(&error),
         }
     }
 
     fn try_rebuild_observed_index(
         &self,
         request: &RebuildSearchIndexRequest,
+        policy: &ObservedValuesRetrievalPolicy,
     ) -> Result<SearchMaintenanceResult, SearchManagerError> {
-        let policy = self.observed_retrieval_policy(&request.workspace_name)?;
         self.observed.rebuild_index(
             SearchProviderRebuildRequest {
                 workspace_name: &request.workspace_name,
             },
-            &policy,
+            policy,
         )
     }
 
@@ -560,11 +585,11 @@ impl SearchManager {
         )
     }
 
-    fn observed_retrieval_policy(
+    async fn observed_retrieval_policy(
         &self,
         workspace_name: &WorkspaceName,
     ) -> Result<ObservedValuesRetrievalPolicy, AppError> {
-        let load = self.observed_scope_loader.load(workspace_name)?;
+        let load = self.observed_scope_loader.load(workspace_name).await?;
         Ok(observed_retrieval_policy_from_load(
             load,
             OBSERVED_STALE_AFTER_LAST_OBSERVED_DAYS,
@@ -741,14 +766,11 @@ fn observed_retrieval_policy_from_load(
     )
 }
 
-fn observed_rebuild_error_provider_result(error: &SearchManagerError) -> SearchMaintenanceResult {
+fn observed_rebuild_error_provider_result(error: &AppError) -> SearchMaintenanceResult {
     SearchMaintenanceResult {
         provider: SearchProviderKind::ObservedValues,
         state: SearchMaintenanceState::Failed,
-        note: format!(
-            "observed-value search index rebuild failed: {}",
-            search_manager_error_message(error)
-        ),
+        note: format!("observed-value search index rebuild failed: {error}"),
         detail: None,
     }
 }
@@ -759,12 +781,6 @@ fn observed_values_search_disabled_maintenance_result() -> SearchMaintenanceResu
         state: SearchMaintenanceState::Skipped,
         note: OBSERVED_VALUES_SEARCH_DISABLED_MAINTENANCE_NOTE.to_string(),
         detail: None,
-    }
-}
-
-fn search_manager_error_message(error: &SearchManagerError) -> String {
-    match error {
-        SearchManagerError::App(error) => error.to_string(),
     }
 }
 

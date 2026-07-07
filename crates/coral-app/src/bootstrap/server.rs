@@ -447,6 +447,7 @@ impl ServerBuilder {
             layout.clone(),
             workspace_lifecycle_lock.clone(),
             self.config.engine_extensions_providers,
+            Arc::clone(&coral_db),
             diagnostic_reporter.clone(),
             workspace_pool_registry,
         )
@@ -459,6 +460,7 @@ impl ServerBuilder {
             layout,
             &config_store,
             workspace_manager.clone(),
+            Arc::clone(&coral_db),
             observed_values_search_enabled,
             diagnostic_reporter,
             CatalogDiscovery::new(query_manager.clone()),
@@ -1148,7 +1150,7 @@ enabled = false
             credential_manager.clone(),
             layout.clone(),
             None,
-            db,
+            Arc::clone(&db),
         );
         let query_manager = QueryManager::new_for_tests(
             config_store.clone(),
@@ -1157,12 +1159,14 @@ enabled = false
             QueryRuntimeContext::default(),
             layout.clone(),
             vec![Arc::new(NoopEngineExtensionsProvider)],
+            Arc::clone(&db),
         );
         let lifecycle_lock = workspace_manager.lifecycle_lock();
         let search = SearchManager::new(
             layout.clone(),
             &config_store,
             workspace_manager,
+            Arc::clone(&db),
             true,
             CatalogDiscovery::new(query_manager),
             lifecycle_lock,
@@ -1747,6 +1751,7 @@ backend = "unsupported"
             QueryRuntimeContext::default(),
             layout.clone(),
             vec![Arc::new(NoopEngineExtensionsProvider)],
+            Arc::clone(&db),
         );
         let search_observations = SearchObservationHandle::new(layout.clone());
         let lifecycle_lock = workspace_manager.lifecycle_lock();
@@ -1754,6 +1759,7 @@ backend = "unsupported"
             layout.clone(),
             &config_store,
             workspace_manager.clone(),
+            Arc::clone(&db),
             true,
             CatalogDiscovery::new(query_manager.clone()),
             lifecycle_lock,
@@ -2204,6 +2210,7 @@ tables:
             },
             layout.clone(),
             vec![Arc::new(NoopEngineExtensionsProvider)],
+            Arc::clone(&db),
         );
         let search_observations = SearchObservationHandle::new(layout.clone());
         let lifecycle_lock = workspace_manager.lifecycle_lock();
@@ -2211,6 +2218,7 @@ tables:
             layout.clone(),
             &config_store,
             workspace_manager.clone(),
+            Arc::clone(&db),
             true,
             CatalogDiscovery::new(query_manager.clone()),
             lifecycle_lock,
@@ -2334,6 +2342,7 @@ tables:
             QueryRuntimeContext::default(),
             layout.clone(),
             vec![Arc::new(NoopEngineExtensionsProvider)],
+            Arc::clone(&db),
         );
         let search_observations = SearchObservationHandle::new(layout.clone());
         let lifecycle_lock = workspace_manager.lifecycle_lock();
@@ -2341,6 +2350,7 @@ tables:
             layout.clone(),
             &config_store,
             workspace_manager.clone(),
+            Arc::clone(&db),
             true,
             CatalogDiscovery::new(query_manager.clone()),
             lifecycle_lock,
@@ -2464,6 +2474,7 @@ tables:
             QueryRuntimeContext::default(),
             layout.clone(),
             vec![Arc::new(NoopEngineExtensionsProvider)],
+            Arc::clone(&db),
         );
         let search_observations = SearchObservationHandle::new(layout.clone());
         let lifecycle_lock = workspace_manager.lifecycle_lock();
@@ -2471,6 +2482,7 @@ tables:
             layout.clone(),
             &config_store,
             workspace_manager.clone(),
+            Arc::clone(&db),
             true,
             CatalogDiscovery::new(query_manager.clone()),
             lifecycle_lock,

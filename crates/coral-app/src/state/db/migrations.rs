@@ -508,7 +508,7 @@ mod tests {
         S: DbSession,
     {
         Ok(session
-            .fetch_all::<(String,)>(
+            .fetch_all_scalars::<String>(
                 Query::select()
                     .column(Sources::CredentialRevision)
                     .from(Sources::Table)
@@ -519,8 +519,7 @@ mod tests {
             .await?
             .into_iter()
             .next()
-            .expect("source row")
-            .0)
+            .expect("source row"))
     }
 
     async fn fetch_count<S>(session: &mut S, statement: SelectStatement) -> Result<i64, DbError>

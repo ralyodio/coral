@@ -47,14 +47,6 @@ impl AppConfig {
         self.catalog.workspace_sources(workspace_name)
     }
 
-    pub(crate) fn get_source(
-        &self,
-        workspace_name: &WorkspaceName,
-        source_name: &SourceName,
-    ) -> Option<InstalledSource> {
-        self.catalog.get_source(workspace_name, source_name)
-    }
-
     pub(crate) fn dependent_join_config(
         &self,
         selected_source_names: &[String],
@@ -544,6 +536,7 @@ impl ConfigStore {
         self.load_unlocked()
     }
 
+    #[cfg(test)]
     pub(crate) fn load_config(&self) -> Result<AppConfig, AppError> {
         let _lock = self.state_lock_shared()?;
         self.load_config_unlocked()
@@ -657,6 +650,7 @@ impl ConfigStore {
             .ok_or_else(|| AppError::SourceNotFound(format!("{workspace_name}:{source_name}")))
     }
 
+    #[cfg(test)]
     pub(crate) fn get_source(
         &self,
         workspace_name: &WorkspaceName,
@@ -664,6 +658,7 @@ impl ConfigStore {
     ) -> Result<InstalledSource, AppError> {
         let config = self.load_config()?;
         config
+            .catalog
             .get_source(workspace_name, source_name)
             .ok_or_else(|| AppError::SourceNotFound(format!("{workspace_name}:{source_name}")))
     }
