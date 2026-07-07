@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use super::session::DbRepos;
-use super::{CoralDb, now_unix_nanos_i64};
+use super::{CoralDb, CoralTx, now_unix_nanos_i64};
 use crate::bootstrap::AppError;
 use crate::sources::model::InstalledSource;
 use crate::state::{AppStateLayout, ConfigStore};
@@ -113,15 +113,12 @@ where
     Ok(())
 }
 
-async fn import_legacy_source_catalog<S>(
-    session: &mut S,
+async fn import_legacy_source_catalog(
+    session: &mut CoralTx<'_>,
     entries: &[(WorkspaceName, InstalledSource)],
     now_unix_nanos: i64,
     imported_workspaces: &mut BTreeSet<WorkspaceName>,
-) -> Result<usize, AppError>
-where
-    S: DbRepos,
-{
+) -> Result<usize, AppError> {
     let mut source_count = 0;
     for (workspace_name, source) in entries {
         imported_workspaces.insert(workspace_name.clone());
