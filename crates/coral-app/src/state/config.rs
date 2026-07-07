@@ -47,6 +47,7 @@ impl AppConfig {
         self.catalog.workspace_sources(workspace_name)
     }
 
+    #[cfg(test)]
     pub(crate) fn get_source(
         &self,
         workspace_name: &WorkspaceName,
@@ -544,6 +545,7 @@ impl ConfigStore {
         self.load_unlocked()
     }
 
+    #[cfg(test)]
     pub(crate) fn load_config(&self) -> Result<AppConfig, AppError> {
         let _lock = self.state_lock_shared()?;
         self.load_config_unlocked()
@@ -657,6 +659,7 @@ impl ConfigStore {
             .ok_or_else(|| AppError::SourceNotFound(format!("{workspace_name}:{source_name}")))
     }
 
+    #[cfg(test)]
     pub(crate) fn get_source(
         &self,
         workspace_name: &WorkspaceName,
