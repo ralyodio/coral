@@ -5,7 +5,7 @@ import { data, redirect } from 'react-router'
 import { requestAuthContext } from '@/auth/server-context'
 import { getOnboardingStepState } from '@/components/onboarding/onboarding-steps'
 import { isCoralDesktopBuild } from '@/lib/coral-desktop'
-import { completeGuiOnboarding } from '@/lib/gui-onboarding.server'
+import { completeGuiOnboarding, getGuiOnboardingCompleted } from '@/lib/gui-onboarding.server'
 import type { CompleteGuiOnboardingError } from '@/lib/gui-onboarding'
 import { loadOnboardingSampleQuery } from '@/lib/onboarding-query.server'
 import { errorMessage } from '@/lib/utils'
@@ -18,6 +18,8 @@ import { loadSourcesRouteData } from './sources-loader'
 
 export async function loader({ context, request }: Route.LoaderArgs) {
   const accessToken = context.get(requestAuthContext).accessToken
+  if (await getGuiOnboardingCompleted(request, accessToken)) return redirect(routePath('home'))
+
   const workspaces = await listWorkspacesForRequest(request, accessToken)
   const [workspace] = workspaces
   if (!workspace) {
