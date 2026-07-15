@@ -9,6 +9,8 @@
 mod catalog_discovery_tests;
 #[path = "grpc/function_lifecycle_tests.rs"]
 mod function_lifecycle_tests;
+#[path = "grpc/gui_onboarding_tests.rs"]
+mod gui_onboarding_tests;
 #[path = "grpc/harness.rs"]
 mod harness;
 #[path = "grpc/health_service_tests.rs"]

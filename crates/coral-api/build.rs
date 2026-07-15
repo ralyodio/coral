@@ -28,6 +28,7 @@ fn main() {
                 "proto/coral/v1/search.proto",
                 "proto/coral/v1/functions.proto",
                 "proto/coral/v1/traces.proto",
+                "proto/coral/v1/gui_onboarding.proto",
             ],
             &["proto"],
         )
