@@ -1502,7 +1502,7 @@ mod tests {
     use crate::request_context::RequestContext;
     use crate::sources::manager::{ImportSourceCommand, SourceBindings, SourceManager};
     use crate::sources::model::SourceOrigin;
-    use crate::state::db::{CoralDb, DatabaseConfig, ResolvedDatabaseConfig, run_state_migrations};
+    use crate::state::db::{CoralDb, open_test_database, run_state_migrations};
     use crate::task::activity::TaskActivityRecorder;
     use crate::task::manager::TaskManager;
     use crate::task::store::TaskStore;
@@ -1542,6 +1542,7 @@ mod tests {
         .with_task_activity_recorder(TaskActivityRecorder::new(Arc::clone(&db)));
         QueryManagerFixture {
             _temp: temp,
+            db,
             manager,
             db,
         }
@@ -1599,18 +1600,13 @@ mod tests {
     }
 
     async fn test_db(layout: &AppStateLayout, config_store: &ConfigStore) -> Arc<CoralDb> {
-        let config = DatabaseConfig::load(layout).expect("db config");
-        let DatabaseConfig::Sqlite { path } = config else {
-            panic!("default test config should be sqlite");
-        };
-        let db = CoralDb::open(ResolvedDatabaseConfig::Sqlite { path })
+        let db = open_test_database(layout)
             .await
-            .expect("open sqlite");
-        db.migrate().await.expect("migrate sqlite");
+            .expect("open test database");
         run_state_migrations(&db, config_store, layout)
             .await
             .expect("run state migrations");
-        Arc::new(db)
+        db
     }
 
     async fn active_task_context(db: &Arc<CoralDb>) -> (TaskManager, RequestContext, String) {
@@ -2640,6 +2636,7 @@ tables:
             fixture.manager.config_store.clone(),
             fixture.manager.credential_manager.clone(),
             fixture.manager.layout.clone(),
+            Arc::clone(&fixture.db),
         );
         let workspace_name = WorkspaceName::default();
         let descriptor_temp = tempfile::tempdir().expect("descriptor temp dir");
@@ -2869,6 +2866,7 @@ surface:
             fixture.manager.config_store.clone(),
             fixture.manager.credential_manager.clone(),
             fixture.manager.layout.clone(),
+            Arc::clone(&fixture.db),
         );
         let workspace_name = WorkspaceName::default();
         let descriptor_temp = tempfile::tempdir().expect("descriptor temp dir");
