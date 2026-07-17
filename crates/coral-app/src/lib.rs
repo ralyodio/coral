@@ -52,6 +52,7 @@ mod feedback;
 mod functions;
 mod hash;
 mod identity;
+mod identity_specs;
 mod oauth_resource;
 mod outbound_url_policy;
 mod query;
