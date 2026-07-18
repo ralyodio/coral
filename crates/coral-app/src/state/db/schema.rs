@@ -90,6 +90,8 @@ pub(in crate::state::db) enum Identities {
     IdentitySpecFingerprint,
     Issuer,
     IdentityType,
+    IdentitySpecAudiencePort,
+    IdentitySpecAudienceHost,
     CreatedAtUnixNanos,
     UpdatedAtUnixNanos,
 }
