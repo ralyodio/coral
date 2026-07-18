@@ -21,7 +21,6 @@ pub(crate) use coral_db::CoralDb;
 pub(crate) use error::DbError;
 pub(crate) use import::run_state_migrations;
 pub(crate) use repositories::identities::IdentityRecord;
-#[cfg(test)]
 pub(crate) use repositories::identity_documents::IdentityDocumentRecord;
 #[cfg(test)]
 pub(crate) use repositories::identity_documents_contract_tests::set_identity_document_version;
