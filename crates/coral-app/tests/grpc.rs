@@ -13,6 +13,8 @@ mod function_lifecycle_tests;
 mod harness;
 #[path = "grpc/health_service_tests.rs"]
 mod health_service_tests;
+#[path = "grpc/identity_lifecycle_tests.rs"]
+mod identity_lifecycle_tests;
 #[path = "grpc/identity_spec_lifecycle_tests.rs"]
 mod identity_spec_lifecycle_tests;
 #[path = "grpc/oauth_refresh_tests.rs"]

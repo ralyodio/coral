@@ -18,6 +18,7 @@ use axum::response::Response as AxumResponse;
 use coral_api::v1::catalog_service_server::CatalogServiceServer;
 use coral_api::v1::feedback_service_server::FeedbackServiceServer;
 use coral_api::v1::function_service_server::FunctionServiceServer;
+use coral_api::v1::identity_service_server::IdentityServiceServer;
 use coral_api::v1::identity_spec_service_server::IdentitySpecServiceServer;
 use coral_api::v1::query_service_server::QueryServiceServer;
 use coral_api::v1::search_service_server::SearchServiceServer;
@@ -27,9 +28,9 @@ use coral_api::v1::trace_service_server::TraceServiceServer;
 use coral_api::v1::workspace_service_server::WorkspaceServiceServer;
 use coral_api::{
     CATALOG_RESPONSE_MAX_MESSAGE_SIZE, HTTP2_MAX_HEADER_LIST_SIZE,
-    IDENTITY_SPEC_RESPONSE_MAX_MESSAGE_SIZE, QUERY_RESPONSE_MAX_MESSAGE_SIZE,
-    SEARCH_RESPONSE_MAX_MESSAGE_SIZE, SOURCE_RESPONSE_MAX_MESSAGE_SIZE,
-    TRACE_RESPONSE_MAX_MESSAGE_SIZE,
+    IDENTITY_RESPONSE_MAX_MESSAGE_SIZE, IDENTITY_SPEC_RESPONSE_MAX_MESSAGE_SIZE,
+    QUERY_RESPONSE_MAX_MESSAGE_SIZE, SEARCH_RESPONSE_MAX_MESSAGE_SIZE,
+    SOURCE_RESPONSE_MAX_MESSAGE_SIZE, TRACE_RESPONSE_MAX_MESSAGE_SIZE,
 };
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, watch};
@@ -63,6 +64,8 @@ use crate::feedback::publisher::{
 };
 use crate::feedback::service::FeedbackService;
 use crate::functions::service::FunctionService;
+use crate::identities::manager::IdentityManager;
+use crate::identities::service::IdentityService;
 use crate::identity::{LocalPrincipalProvider, PrincipalProvider};
 use crate::identity_specs::manager::IdentitySpecManager;
 use crate::identity_specs::service::IdentitySpecService;
@@ -409,8 +412,8 @@ impl ServerBuilder {
         let credential_config = CredentialStorageConfig::load(&layout)?;
         let configured_key_provider = configured_credential_key_provider(&credential_config)?;
         let database_config = resolve_database_config(&layout)?;
-        let (identity_spec_key_provider, postgres_without_identity_spec_key) =
-            identity_spec_key_provider(&layout, &database_config, configured_key_provider);
+        let (identity_key_provider, postgres_without_identity_key) =
+            identity_key_provider(&layout, &database_config, configured_key_provider);
         let features = FeatureStore::from_layout(layout.clone())
             .load_with_overrides(&self.config.feature_overrides)?;
         let coral_db = init_database(database_config).await?;
@@ -418,11 +421,12 @@ impl ServerBuilder {
         run_state_migrations(&coral_db, &config_store, &layout).await?;
         let coral_db = Arc::new(coral_db);
         let identity_specs =
-            IdentitySpecManager::new(Arc::clone(&coral_db), identity_spec_key_provider);
+            IdentitySpecManager::new(Arc::clone(&coral_db), Arc::clone(&identity_key_provider));
+        let identities = IdentityManager::new(Arc::clone(&coral_db), identity_key_provider);
         let (telemetry_config, active_trace_store_dir, trace_components) = init_server_tracing(
             &layout,
             self.config.enable_stderr_logs,
-            postgres_without_identity_spec_key,
+            postgres_without_identity_key,
         )?;
         let credential_store =
             CredentialStore::with_preference(layout.clone(), credential_config.storage);
@@ -496,6 +500,7 @@ impl ServerBuilder {
                 feedback: feedback_manager,
                 task: task_manager,
                 identity_specs,
+                identities,
             },
             trace_components,
             principal_provider,
@@ -554,12 +559,12 @@ async fn init_database(database_config: ResolvedDatabaseConfig) -> Result<CoralD
 fn init_server_tracing(
     layout: &AppStateLayout,
     enable_stderr_logs: bool,
-    postgres_without_identity_spec_key: bool,
+    postgres_without_identity_key: bool,
 ) -> Result<(TelemetryConfig, Option<PathBuf>, TraceServerComponents), AppError> {
     let (telemetry_config, active_trace_store) = init_server_telemetry(layout, enable_stderr_logs)?;
-    if postgres_without_identity_spec_key {
+    if postgres_without_identity_key {
         tracing::warn!(
-            "encrypted identity-spec setup inputs are unavailable for Postgres because no credential encryption key is configured"
+            "encrypted identity-spec inputs and identity setup material are unavailable for Postgres because no credential encryption key is configured"
         );
     }
     let active_trace_store_dir = active_trace_store.as_ref().map(|store| store.dir.clone());
@@ -648,7 +653,7 @@ where
     })
 }
 
-fn identity_spec_key_provider(
+fn identity_key_provider(
     layout: &AppStateLayout,
     database_config: &ResolvedDatabaseConfig,
     configured: Option<ConfiguredCredentialKeyProvider>,
@@ -823,6 +828,7 @@ struct ServerDependencies {
     feedback: FeedbackManager,
     task: TaskManager,
     identity_specs: IdentitySpecManager,
+    identities: IdentityManager,
 }
 
 async fn start_server(
@@ -845,6 +851,7 @@ async fn start_server(
         feedback,
         task,
         identity_specs,
+        identities,
     } = dependencies;
     let (source, query) = match search_observations.as_ref() {
         Some(search_observations) => (
@@ -863,6 +870,7 @@ async fn start_server(
     let feedback_service = FeedbackService::new(feedback, task.clone());
     let task_service = TaskService::new(task);
     let identity_spec_service = IdentitySpecService::new(identity_specs);
+    let identity_service = IdentityService::new(identities);
     let mut application_routes = Routes::default()
         .add_service(
             SourceServiceServer::new(source_service)
@@ -877,6 +885,10 @@ async fn start_server(
         .add_service(
             IdentitySpecServiceServer::new(identity_spec_service)
                 .max_encoding_message_size(IDENTITY_SPEC_RESPONSE_MAX_MESSAGE_SIZE),
+        )
+        .add_service(
+            IdentityServiceServer::new(identity_service)
+                .max_encoding_message_size(IDENTITY_RESPONSE_MAX_MESSAGE_SIZE),
         )
         .add_service(FunctionServiceServer::new(function_service))
         .add_service(TaskServiceServer::new(task_service))
@@ -1178,8 +1190,7 @@ mod tests {
     use super::{
         RunningServer, ServerBuilder, ServerDependencies, ServerMode, StaticAsset,
         StaticAssetsProvider, TraceServerComponents, configured_credential_key_provider_with,
-        identity_spec_key_provider, is_grpc_web_content_type, is_native_grpc_content_type,
-        start_server,
+        identity_key_provider, is_grpc_web_content_type, is_native_grpc_content_type, start_server,
     };
     use crate::bootstrap::AppError;
     use crate::catalog::discovery::CatalogDiscovery;
@@ -1190,6 +1201,7 @@ mod tests {
     use crate::credentials::{CredentialManager, CredentialStore, CredentialsError};
     use crate::features::{Feature, FeatureOverrides};
     use crate::feedback::manager::FeedbackManager;
+    use crate::identities::manager::IdentityManager;
     use crate::identity_specs::manager::IdentitySpecManager;
     use crate::query::manager::QueryManager;
     use crate::search::manager::SearchManager;
@@ -1321,7 +1333,7 @@ mod tests {
         let sqlite = ResolvedDatabaseConfig::Sqlite {
             path: layout.database_file(),
         };
-        let (sqlite_provider, missing_key) = identity_spec_key_provider(&layout, &sqlite, None);
+        let (sqlite_provider, missing_key) = identity_key_provider(&layout, &sqlite, None);
         assert!(!missing_key);
         let local_key = sqlite_provider.active_key().expect("local key");
 
@@ -1330,7 +1342,7 @@ mod tests {
         let configured =
             ConfiguredCredentialKeyProvider::new(active.clone(), [previous.clone()]).expect("keys");
         let (sqlite_provider, missing_key) =
-            identity_spec_key_provider(&layout, &sqlite, Some(configured));
+            identity_key_provider(&layout, &sqlite, Some(configured));
         assert!(!missing_key);
         assert_eq!(
             sqlite_provider.active_key().expect("configured key"),
@@ -1350,7 +1362,7 @@ mod tests {
         let postgres = ResolvedDatabaseConfig::Postgres {
             url: "postgres://example.invalid/coral".to_string(),
         };
-        let (provider, missing_key) = identity_spec_key_provider(&layout, &postgres, None);
+        let (provider, missing_key) = identity_key_provider(&layout, &postgres, None);
         assert!(missing_key);
         assert!(matches!(
             provider.active_key(),
@@ -1363,8 +1375,7 @@ mod tests {
 
         let active = CredentialEncryptionKey::from_static_bytes_for_test([7; 32]);
         let configured = ConfiguredCredentialKeyProvider::new(active.clone(), []).expect("keys");
-        let (provider, missing_key) =
-            identity_spec_key_provider(&layout, &postgres, Some(configured));
+        let (provider, missing_key) = identity_key_provider(&layout, &postgres, Some(configured));
         assert!(!missing_key);
         assert_eq!(provider.active_key().expect("configured key"), active);
         assert!(matches!(
@@ -1448,16 +1459,19 @@ enabled = false
         Arc::new(db)
     }
 
-    fn test_identity_spec_manager(
+    fn test_identity_managers(
         layout: &AppStateLayout,
         db: &Arc<CoralDb>,
-    ) -> IdentitySpecManager {
+    ) -> (IdentitySpecManager, IdentityManager) {
         let config = ResolvedDatabaseConfig::Sqlite {
             path: layout.database_file(),
         };
-        let (key_provider, missing_key) = identity_spec_key_provider(layout, &config, None);
+        let (key_provider, missing_key) = identity_key_provider(layout, &config, None);
         assert!(!missing_key);
-        IdentitySpecManager::new(Arc::clone(db), key_provider)
+        (
+            IdentitySpecManager::new(Arc::clone(db), Arc::clone(&key_provider)),
+            IdentityManager::new(Arc::clone(db), key_provider),
+        )
     }
 
     #[tokio::test]
@@ -2088,6 +2102,7 @@ backend = "unsupported"
             CatalogDiscovery::new(query_manager.clone()),
             lifecycle_lock,
         );
+        let (identity_specs, identities) = test_identity_managers(&layout, &db);
         let trace_service = TraceService::new(TraceManager::new(
             temp.path().join("trace-store"),
             Duration::from_mins(1),
@@ -2101,7 +2116,8 @@ backend = "unsupported"
                 search_observations: Some(search_observations),
                 feedback: feedback_manager,
                 task: task_manager,
-                identity_specs: test_identity_spec_manager(&layout, &db),
+                identity_specs,
+                identities,
             },
             TraceServerComponents {
                 service: Some(trace_service),
@@ -2545,6 +2561,7 @@ tables:
             CatalogDiscovery::new(query_manager.clone()),
             lifecycle_lock,
         );
+        let (identity_specs, identities) = test_identity_managers(&layout, &db);
         let running = start_server(
             ServerDependencies {
                 source: source_manager,
@@ -2554,7 +2571,8 @@ tables:
                 search_observations: Some(search_observations),
                 feedback: feedback_manager,
                 task: task_manager,
-                identity_specs: test_identity_spec_manager(&layout, &db),
+                identity_specs,
+                identities,
             },
             TraceServerComponents::default(),
             Arc::new(LocalPrincipalProvider),
@@ -2675,6 +2693,7 @@ tables:
             CatalogDiscovery::new(query_manager.clone()),
             lifecycle_lock,
         );
+        let (identity_specs, identities) = test_identity_managers(&layout, &db);
         let running = start_server(
             ServerDependencies {
                 source: source_manager,
@@ -2684,7 +2703,8 @@ tables:
                 search_observations: Some(search_observations),
                 feedback: feedback_manager,
                 task: task_manager,
-                identity_specs: test_identity_spec_manager(&layout, &db),
+                identity_specs,
+                identities,
             },
             TraceServerComponents::default(),
             Arc::new(LocalPrincipalProvider),
@@ -2805,6 +2825,7 @@ tables:
             CatalogDiscovery::new(query_manager.clone()),
             lifecycle_lock,
         );
+        let (identity_specs, identities) = test_identity_managers(&layout, &db);
         let running = start_server(
             ServerDependencies {
                 source: source_manager,
@@ -2814,7 +2835,8 @@ tables:
                 search_observations: Some(search_observations),
                 feedback: feedback_manager,
                 task: task_manager,
-                identity_specs: test_identity_spec_manager(&layout, &db),
+                identity_specs,
+                identities,
             },
             TraceServerComponents::default(),
             Arc::new(LocalPrincipalProvider),
