@@ -7,9 +7,11 @@ use crate::state::AppStateLayout;
 
 use super::CredentialStoragePreference;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct CredentialStorageConfig {
     pub(crate) storage: CredentialStoragePreference,
+    pub(crate) encryption_key_env: Option<String>,
+    pub(crate) decryption_key_envs: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -19,9 +21,14 @@ struct CredentialStorageConfigFile {
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct CredentialStorageConfigSection {
     #[serde(default)]
     storage: CredentialStoragePreference,
+    #[serde(default)]
+    encryption_key_env: Option<String>,
+    #[serde(default)]
+    decryption_key_envs: Vec<String>,
 }
 
 impl CredentialStorageConfig {
@@ -33,6 +40,8 @@ impl CredentialStorageConfig {
         let file = toml::from_str::<CredentialStorageConfigFile>(&raw)?;
         Ok(Self {
             storage: file.credentials.storage,
+            encryption_key_env: file.credentials.encryption_key_env,
+            decryption_key_envs: file.credentials.decryption_key_envs,
         })
     }
 }
@@ -57,5 +66,36 @@ storage = "file"
         )
         .expect("config");
         assert_eq!(file.credentials.storage, CredentialStoragePreference::File);
+    }
+
+    #[test]
+    fn parses_encryption_key_environment_variables() {
+        let file = toml::from_str::<CredentialStorageConfigFile>(
+            r#"
+[credentials]
+encryption_key_env = "CORAL_ACTIVE_KEY"
+decryption_key_envs = ["CORAL_PREVIOUS_KEY"]
+"#,
+        )
+        .expect("config");
+
+        assert_eq!(
+            file.credentials.encryption_key_env.as_deref(),
+            Some("CORAL_ACTIVE_KEY")
+        );
+        assert_eq!(file.credentials.decryption_key_envs, ["CORAL_PREVIOUS_KEY"]);
+    }
+
+    #[test]
+    fn rejects_unknown_credential_fields() {
+        let error = toml::from_str::<CredentialStorageConfigFile>(
+            r#"
+[credentials]
+decryption_key_env = "CORAL_PREVIOUS_KEY"
+"#,
+        )
+        .expect_err("misspelled key field");
+
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 }

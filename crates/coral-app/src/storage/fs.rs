@@ -45,6 +45,22 @@ pub(crate) fn ensure_private_dir_no_symlink(path: &Path) -> io::Result<()> {
         }
         Err(error) => return Err(error),
     }
+    tighten_private_dir_no_symlink(path)
+}
+
+fn ensure_existing_private_dir_no_symlink(path: &Path) -> io::Result<()> {
+    if path.as_os_str().is_empty() || path == Path::new(".") {
+        return Ok(());
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => tighten_private_dir_no_symlink(path),
+        Ok(_) => Err(private_directory_error(path)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(private_directory_error(path)),
+        Err(error) => Err(error),
+    }
+}
+
+fn tighten_private_dir_no_symlink(path: &Path) -> io::Result<()> {
     let handle = Handle::from_path(path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             private_directory_error(path)
@@ -83,16 +99,9 @@ pub(crate) fn ensure_file_private(path: &Path) -> io::Result<()> {
 }
 
 /// Reads a bounded private regular file while pinning its cross-platform identity.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the next stack layer activates strict reads for local encryption keys"
-    )
-)]
 pub(crate) fn read_to_string_private(path: &Path, max_bytes: u64) -> io::Result<String> {
     if let Some(parent) = path.parent() {
-        ensure_private_dir_no_symlink(parent)?;
+        ensure_existing_private_dir_no_symlink(parent)?;
     }
     let path_metadata = fs::symlink_metadata(path)?;
     if !path_metadata.file_type().is_file() {
@@ -531,6 +540,18 @@ mod tests {
         let error = read_to_string_private(&parent.join("encryption.key"), 1024)
             .expect_err("symlinked parent should be rejected");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn read_to_string_private_does_not_recreate_a_missing_parent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let parent = temp.path().join("credentials");
+
+        let error = read_to_string_private(&parent.join("encryption.key"), 1024)
+            .expect_err("missing parent should be rejected");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(!parent.exists());
     }
 
     #[test]
