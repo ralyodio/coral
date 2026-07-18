@@ -24,6 +24,7 @@ fn main() {
                 "proto/coral/v1/task.proto",
                 "proto/coral/v1/feedback.proto",
                 "proto/coral/v1/sources.proto",
+                "proto/coral/v1/identity_specs.proto",
                 "proto/coral/v1/query.proto",
                 "proto/coral/v1/search.proto",
                 "proto/coral/v1/functions.proto",
