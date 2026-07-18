@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use coral_spec::{IdentityManifest, IdentitySpecType, parse_identity_manifest_yaml};
 
@@ -86,6 +88,15 @@ pub(crate) struct IdentitySpecManager {
     key_provider: Arc<dyn CredentialKeyProvider>,
     #[cfg(test)]
     mutation_barrier: Option<Arc<tokio::sync::Barrier>>,
+    #[cfg(test)]
+    before_lifecycle_write: Option<BeforeLifecycleWriteGate>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct BeforeLifecycleWriteGate {
+    barrier: Arc<tokio::sync::Barrier>,
+    used: Arc<AtomicBool>,
 }
 
 impl IdentitySpecManager {
@@ -95,12 +106,23 @@ impl IdentitySpecManager {
             key_provider,
             #[cfg(test)]
             mutation_barrier: None,
+            #[cfg(test)]
+            before_lifecycle_write: None,
         }
     }
 
     #[cfg(test)]
     fn with_mutation_barrier(mut self, barrier: Arc<tokio::sync::Barrier>) -> Self {
         self.mutation_barrier = Some(barrier);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_before_lifecycle_write(mut self, barrier: Arc<tokio::sync::Barrier>) -> Self {
+        self.before_lifecycle_write = Some(BeforeLifecycleWriteGate {
+            barrier,
+            used: Arc::new(AtomicBool::new(false)),
+        });
         self
     }
 
@@ -340,6 +362,8 @@ impl IdentitySpecManager {
         }
         let result = async {
             require_equivalent_dependents(&mut tx, key, manifest).await?;
+            #[cfg(test)]
+            self.wait_before_lifecycle_write().await;
             let now = now_unix_nanos_i64()?;
             let record = tx
                 .identity_specs()
@@ -385,6 +409,8 @@ impl IdentitySpecManager {
                     scope_label(key.scope()),
                 )));
             }
+            #[cfg(test)]
+            self.wait_before_lifecycle_write().await;
             if !tx.identity_specs().delete(key).await? {
                 return Err(spec_not_found(key));
             }
@@ -400,6 +426,15 @@ impl IdentitySpecManager {
                 tx.rollback().await?;
                 Err(error)
             }
+        }
+    }
+
+    #[cfg(test)]
+    async fn wait_before_lifecycle_write(&self) {
+        if let Some(gate) = &self.before_lifecycle_write
+            && !gate.used.swap(true, Ordering::SeqCst)
+        {
+            gate.barrier.wait().await;
         }
     }
 
@@ -646,6 +681,7 @@ pub(crate) mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread::{self, ThreadId};
+    use std::time::Duration;
 
     use tempfile::{TempDir, tempdir};
 
@@ -658,6 +694,7 @@ pub(crate) mod tests {
     use crate::credentials::encryption::{CredentialEncryptionKey, CredentialKeyProvider};
     use crate::encrypted_document::EncryptedEnvelopeDocument;
     use crate::identities::manager::IdentityManager;
+    use crate::identities::manager::tests::assert_persisted_fixed_token_material;
     use crate::identities::model::{IdentityName, IdentityOwner, IdentitySpecReference};
     use crate::identity::Principal;
     use crate::identity::spec_document::{
@@ -755,6 +792,196 @@ pub(crate) mod tests {
                 .cloned()
                 .ok_or_else(|| CredentialsError::Crypto("missing mutation key".to_string()))
         }
+    }
+
+    pub(crate) async fn assert_identity_spec_lifecycle_race_contract(db: &Arc<CoralDb>) {
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let key_provider: Arc<dyn CredentialKeyProvider> = Arc::new(WriteKeyProvider(
+            CredentialEncryptionKey::from_static_bytes_for_test([53; 32]),
+        ));
+        assert_changed_replacement_create_race(db, Arc::clone(&key_provider), &suffix).await;
+        assert_guarded_delete_create_race(db, key_provider, &suffix).await;
+    }
+
+    async fn assert_changed_replacement_create_race(
+        db: &Arc<CoralDb>,
+        key_provider: Arc<dyn CredentialKeyProvider>,
+        suffix: &str,
+    ) {
+        let name = format!("replace_race_{suffix}");
+        let token = "replacement-race-token";
+        let key = IdentitySpecKey::global(&name).unwrap();
+        let specs = IdentitySpecManager::new(Arc::clone(db), Arc::clone(&key_provider));
+        specs
+            .add_or_replace_exact(
+                IdentitySpecScope::global(),
+                &manifest(&name, "before"),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let gated_specs = IdentitySpecManager::new(Arc::clone(db), Arc::clone(&key_provider))
+            .with_before_lifecycle_write(Arc::clone(&barrier));
+        let gated_identities = IdentityManager::new(Arc::clone(db), Arc::clone(&key_provider))
+            .with_before_upsert_gate(barrier);
+        let principal = UserPrincipal::local();
+        let changed_manifest = manifest(&name, "after");
+        let (created, replaced) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(
+                gated_identities.create_or_replace_user_fixed_token(
+                    &principal,
+                    &name,
+                    &name,
+                    token.to_string(),
+                ),
+                gated_specs.add_or_replace_exact(
+                    IdentitySpecScope::global(),
+                    &changed_manifest,
+                    vec![],
+                ),
+            )
+        })
+        .await
+        .expect("replacement/create race must not deadlock");
+        let created = created.expect("identity creation must converge");
+        let owner = IdentityOwner::for_user(principal);
+        let persisted = assert_persisted_fixed_token_material(
+            db.as_ref(),
+            &owner,
+            &name,
+            token,
+            key_provider.as_ref(),
+        )
+        .await;
+        assert_eq!(persisted, created);
+        assert_eq!(persisted.spec_reference.key(), &key);
+        let current = specs.get_global(&name).await.unwrap();
+        assert_eq!(
+            persisted.spec_reference.fingerprint(),
+            identity_spec_fingerprint(&current.manifest).unwrap()
+        );
+        match replaced {
+            Ok((_installed, true)) => assert_eq!(current.manifest.version, "after"),
+            Err(AppError::FailedPrecondition(detail)) => {
+                assert!(detail.contains("semantically equivalent manifest"));
+                assert_eq!(current.manifest.version, "before");
+            }
+            other => panic!("unexpected replacement/create result: {other:?}"),
+        }
+        cleanup_lifecycle_race_fixture(db, &specs, &owner, &name, &key).await;
+    }
+
+    async fn assert_guarded_delete_create_race(
+        db: &Arc<CoralDb>,
+        key_provider: Arc<dyn CredentialKeyProvider>,
+        suffix: &str,
+    ) {
+        let name = format!("delete_race_{suffix}");
+        let token = "delete-race-token";
+        let key = IdentitySpecKey::global(&name).unwrap();
+        let specs = IdentitySpecManager::new(Arc::clone(db), Arc::clone(&key_provider));
+        specs
+            .add_or_replace_exact(
+                IdentitySpecScope::global(),
+                &manifest(&name, "before"),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let gated_specs = IdentitySpecManager::new(Arc::clone(db), Arc::clone(&key_provider))
+            .with_before_lifecycle_write(Arc::clone(&barrier));
+        let gated_identities = IdentityManager::new(Arc::clone(db), Arc::clone(&key_provider))
+            .with_before_upsert_gate(barrier);
+        let principal = UserPrincipal::local();
+        let (created, deleted) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(
+                gated_identities.create_or_replace_user_fixed_token(
+                    &principal,
+                    &name,
+                    &name,
+                    token.to_string(),
+                ),
+                gated_specs.delete_exact(&key),
+            )
+        })
+        .await
+        .expect("delete/create race must not deadlock");
+        let owner = IdentityOwner::for_user(principal);
+        match (created, deleted) {
+            (Ok(created), Err(AppError::FailedPrecondition(detail))) => {
+                assert!(detail.contains("1 stored identity reference"));
+                let current = specs.get_global(&name).await.unwrap();
+                let persisted = assert_persisted_fixed_token_material(
+                    db.as_ref(),
+                    &owner,
+                    &name,
+                    token,
+                    key_provider.as_ref(),
+                )
+                .await;
+                assert_eq!(persisted, created);
+                assert_eq!(persisted.spec_reference.key(), &key);
+                assert_eq!(
+                    persisted.spec_reference.fingerprint(),
+                    identity_spec_fingerprint(&current.manifest).unwrap()
+                );
+            }
+            (Err(AppError::IdentitySpecNotFound { scope, .. }), Ok(())) if scope == "global" => {
+                assert!(matches!(
+                    specs.get_global(&name).await,
+                    Err(AppError::IdentitySpecNotFound { .. })
+                ));
+                assert_eq!(
+                    identity_pair_exists(db, &owner, &name).await,
+                    (false, false)
+                );
+            }
+            other => panic!("unexpected delete/create result: {other:?}"),
+        }
+        cleanup_lifecycle_race_fixture(db, &specs, &owner, &name, &key).await;
+    }
+
+    async fn identity_pair_exists(
+        db: &Arc<CoralDb>,
+        owner: &IdentityOwner,
+        identity_name: &str,
+    ) -> (bool, bool) {
+        let name = IdentityName::parse(identity_name).unwrap();
+        let mut session = db.as_ref();
+        let identity = session.identities().get(owner, &name).await.unwrap();
+        let document = session
+            .identity_documents()
+            .get(owner, &name)
+            .await
+            .unwrap();
+        (identity.is_some(), document.is_some())
+    }
+
+    async fn cleanup_lifecycle_race_fixture(
+        db: &Arc<CoralDb>,
+        specs: &IdentitySpecManager,
+        owner: &IdentityOwner,
+        identity_name: &str,
+        key: &IdentitySpecKey,
+    ) {
+        let name = IdentityName::parse(identity_name).unwrap();
+        let mut tx = db.begin().await.unwrap();
+        tx.identities().delete(owner, &name).await.unwrap();
+        tx.commit().await.unwrap();
+        match specs.delete_exact(key).await {
+            Ok(()) | Err(AppError::IdentitySpecNotFound { .. }) => {}
+            other => panic!("unexpected lifecycle race cleanup: {other:?}"),
+        }
+        assert_eq!(
+            identity_pair_exists(db, owner, identity_name).await,
+            (false, false)
+        );
+        assert!(matches!(
+            specs.get_exact(key).await,
+            Err(AppError::IdentitySpecNotFound { .. })
+        ));
     }
 
     #[expect(clippy::too_many_lines, reason = "shared backend mutation contract")]
