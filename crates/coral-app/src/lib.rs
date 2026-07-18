@@ -51,6 +51,7 @@ pub mod features;
 mod feedback;
 mod functions;
 mod hash;
+mod identities;
 mod identity;
 mod identity_specs;
 mod oauth_resource;
