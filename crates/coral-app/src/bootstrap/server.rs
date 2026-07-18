@@ -25,6 +25,7 @@ use coral_api::v1::search_service_server::SearchServiceServer;
 use coral_api::v1::source_service_server::SourceServiceServer;
 use coral_api::v1::task_service_server::TaskServiceServer;
 use coral_api::v1::trace_service_server::TraceServiceServer;
+use coral_api::v1::workspace_identity_service_server::WorkspaceIdentityServiceServer;
 use coral_api::v1::workspace_service_server::WorkspaceServiceServer;
 use coral_api::{
     CATALOG_RESPONSE_MAX_MESSAGE_SIZE, HTTP2_MAX_HEADER_LIST_SIZE,
@@ -66,6 +67,7 @@ use crate::feedback::service::FeedbackService;
 use crate::functions::service::FunctionService;
 use crate::identities::manager::IdentityManager;
 use crate::identities::service::IdentityService;
+use crate::identities::workspace_service::WorkspaceIdentityService;
 use crate::identity::{LocalPrincipalProvider, PrincipalProvider};
 use crate::identity_specs::manager::IdentitySpecManager;
 use crate::identity_specs::service::IdentitySpecService;
@@ -831,6 +833,10 @@ struct ServerDependencies {
     identities: IdentityManager,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "service registration stays explicit so transport limits and middleware scope remain visible"
+)]
 async fn start_server(
     dependencies: ServerDependencies,
     trace_components: TraceServerComponents,
@@ -870,7 +876,8 @@ async fn start_server(
     let feedback_service = FeedbackService::new(feedback, task.clone());
     let task_service = TaskService::new(task);
     let identity_spec_service = IdentitySpecService::new(identity_specs);
-    let identity_service = IdentityService::new(identities);
+    let identity_service = IdentityService::new(identities.clone());
+    let workspace_identity_service = WorkspaceIdentityService::new(identities);
     let mut application_routes = Routes::default()
         .add_service(
             SourceServiceServer::new(source_service)
@@ -888,6 +895,10 @@ async fn start_server(
         )
         .add_service(
             IdentityServiceServer::new(identity_service)
+                .max_encoding_message_size(IDENTITY_RESPONSE_MAX_MESSAGE_SIZE),
+        )
+        .add_service(
+            WorkspaceIdentityServiceServer::new(workspace_identity_service)
                 .max_encoding_message_size(IDENTITY_RESPONSE_MAX_MESSAGE_SIZE),
         )
         .add_service(FunctionServiceServer::new(function_service))
