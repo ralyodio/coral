@@ -450,12 +450,12 @@ mod tests {
     use coral_api::v1::identity_spec_service_server::{
         IdentitySpecService, IdentitySpecServiceServer,
     };
-    use coral_api::v1::{SubmitFeedbackRequest, SubmitFeedbackResponse};
     use coral_api::v1::{
         AddIdentitySpecRequest, AddIdentitySpecResponse, DeleteIdentitySpecRequest,
         DeleteIdentitySpecResponse, GetIdentitySpecRequest, GetIdentitySpecResponse,
         IdentitySpecSummary, ListIdentitySpecsRequest, ListIdentitySpecsResponse,
     };
+    use coral_api::v1::{SubmitFeedbackRequest, SubmitFeedbackResponse};
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::trace::SdkTracerProvider;
     use tokio::net::TcpListener;
