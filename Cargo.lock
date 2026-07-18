@@ -1378,6 +1378,7 @@ dependencies = [
  "reqwest 0.13.4",
  "ring",
  "rusqlite",
+ "same-file",
  "sea-query",
  "sea-query-sqlx",
  "serde",
