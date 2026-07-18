@@ -90,7 +90,7 @@ enum Command {
     SearchIndex(SearchIndexArgs),
     /// Manage data sources
     Source(SourceArgs),
-    /// Manage identities owned by the current Coral user
+    /// Manage current-user or explicitly selected workspace identities
     Identity(identity_ops::IdentityArgs),
     /// Manage installed identity specifications
     IdentitySpec(identity_spec_ops::IdentitySpecArgs),
@@ -563,6 +563,9 @@ impl Command {
     }
 
     fn uses_selected_workspace(&self) -> bool {
+        if let Command::Identity(args) = self {
+            return args.uses_selected_workspace();
+        }
         matches!(
             self,
             Command::Sql(_)
@@ -650,10 +653,8 @@ pub async fn run_from_env() -> Result<(), CliError> {
     let workspace_flag_present = workspace_selection.workspace.is_some();
     command.apply_workspace_flag_presence(workspace_flag_present);
     match &command {
-        Command::Identity(_) => {
-            identity_ops::IdentityArgs::validate_explicit_workspace(
-                workspace_selection.workspace.as_deref(),
-            )?;
+        Command::Identity(args) => {
+            args.validate_workspace_selection(workspace_selection.workspace.as_deref())?;
         }
         Command::IdentitySpec(args) => {
             args.validate_explicit_workspace(workspace_selection.workspace.as_deref())?;
@@ -962,7 +963,7 @@ async fn run_app_command(
         Command::Search(args) => run_search(&app, workspace, args).await?,
         Command::SearchIndex(args) => run_search_index(&app, workspace, args).await?,
         Command::Source(args) => run_source(&app, workspace, args).await?,
-        Command::Identity(args) => identity_ops::run(&app, args).await?,
+        Command::Identity(args) => identity_ops::run(&app, workspace, args).await?,
         Command::IdentitySpec(args) => identity_spec_ops::run(&app, workspace, args).await?,
         Command::Workspace(args) => run_workspace(&app, args).await?,
         Command::Function(args) => run_function(&app, workspace, args).await?,
@@ -2138,6 +2139,15 @@ mod tests {
         let source = Cli::try_parse_from(["coral", "source", "list"]).expect("source parses");
         let identity =
             Cli::try_parse_from(["coral", "identity", "list"]).expect("identity list parses");
+        let workspace_identity = Cli::try_parse_from([
+            "coral",
+            "--workspace",
+            "work",
+            "identity",
+            "--workspace-owned",
+            "list",
+        ])
+        .expect("workspace identity list parses");
         let identity_spec = Cli::try_parse_from(["coral", "identity-spec", "list"])
             .expect("identity-spec list parses");
         let functions =
@@ -2151,6 +2161,7 @@ mod tests {
         assert!(search.command.uses_selected_workspace());
         assert!(source.command.uses_selected_workspace());
         assert!(!identity.command.uses_selected_workspace());
+        assert!(workspace_identity.command.uses_selected_workspace());
         assert!(identity_spec.command.uses_selected_workspace());
         assert!(functions.command.uses_selected_workspace());
         assert!(onboard.command.uses_selected_workspace());
