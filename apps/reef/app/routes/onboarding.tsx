@@ -1,6 +1,6 @@
 import type { Route } from './+types/onboarding'
 
-import { data, redirect } from 'react-router'
+import { data, redirect, replace } from 'react-router'
 
 import { requestAuthContext } from '@/auth/server-context'
 import { getOnboardingStepState } from '@/components/onboarding/onboarding-steps'
@@ -18,7 +18,10 @@ import { loadSourcesRouteData } from './sources-loader'
 
 export async function loader({ context, request }: Route.LoaderArgs) {
   const accessToken = context.get(requestAuthContext).accessToken
-  if (await getGuiOnboardingCompleted(request, accessToken)) return redirect(routePath('home'))
+  if (await getGuiOnboardingCompleted(request, accessToken)) {
+    const workspace = await firstWorkspaceForRequest(request, accessToken)
+    return replace(routePath('workspaceTraces', { workspaceId: workspace.name }))
+  }
 
   const workspaces = await listWorkspacesForRequest(request, accessToken)
   const [workspace] = workspaces
