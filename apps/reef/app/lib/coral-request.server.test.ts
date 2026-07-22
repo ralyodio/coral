@@ -81,7 +81,10 @@ describe('request-scoped Coral transport authentication', () => {
     for (const clientFactory of clientFactories) {
       const transport = clientFactory(request, null) as unknown as GrpcWebTransportOptions
 
-      expect(transport).toEqual({ baseUrl: 'http://127.0.0.1:50051' })
+      expect(transport).toEqual({
+        baseUrl: 'http://127.0.0.1:50051',
+        fetch: expect.any(Function),
+      })
     }
     expect(transportMocks.createGrpcWebTransport).toHaveBeenCalledTimes(clientFactories.length)
     expect(transportMocks.createGrpcTransport).not.toHaveBeenCalled()

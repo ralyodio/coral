@@ -55,7 +55,7 @@ export function coralEndpointForRequest(request: Request): string {
   if (configured) return trimTrailingSlash(configured)
 
   if (process.env.NODE_ENV === 'production') {
-    throw new Error('CORAL_ENDPOINT must be set in production')
+    throw new ConnectError('CORAL_ENDPOINT must be set in production', Code.Unavailable)
   }
 
   const url = new URL(request.url)
@@ -80,7 +80,7 @@ function coralTransportForRequest(request: Request, accessToken: string | null) 
       throw new Error('Coral authentication is required but this request carried no access token')
     }
 
-    return createGrpcWebTransport({ baseUrl })
+    return createGrpcWebTransport({ baseUrl, fetch: coralFetch })
   }
 
   const endpoint = new URL(baseUrl)
@@ -180,4 +180,16 @@ function throwCoralError(request: Request, error: unknown): never {
     throw expiredSessionRedirect(request)
   }
   throw error
+}
+
+const coralFetch: typeof globalThis.fetch = async (input, init) => {
+  try {
+    return await globalThis.fetch(input, init)
+  } catch (error) {
+    // Fetch rejects with TypeError when it cannot obtain an HTTP response. Map
+    // that transport failure at its source so Connect can preserve meaningful
+    // Unknown errors returned by a reachable Coral server.
+    if (!(error instanceof TypeError)) throw error
+    throw ConnectError.from(error, Code.Unavailable)
+  }
 }
