@@ -1007,7 +1007,6 @@ mod tests {
     )]
 
     use std::borrow::Cow;
-    use std::collections::BTreeMap;
     use std::future::Future as _;
     use std::net::{Ipv4Addr, SocketAddr, TcpListener};
     use std::path::Path;
