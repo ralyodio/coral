@@ -93,6 +93,7 @@ pub(in crate::state::db) enum Sources {
     Version,
     OriginKind,
     CredentialStorage,
+    CredentialRevision,
     CreatedAtUnixNanos,
     UpdatedAtUnixNanos,
 }
