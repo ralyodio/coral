@@ -36,7 +36,7 @@ export function OnboardingView({
   const submit = useSubmit()
   const { step } = loaderData
   const completing =
-    navigation.state !== 'idle' && navigation.formData?.get('_intent') === 'complete-onboarding'
+    navigation.state !== 'idle' && navigation.formData?.get('intent') === 'complete-onboarding'
   const completionError =
     !completing && actionData?.intent === 'complete-onboarding' ? actionData.message : null
   const sourcesActionData = actionData?.intent === 'complete-onboarding' ? undefined : actionData
@@ -94,7 +94,7 @@ export function OnboardingView({
           completionError={completionError}
           completing={completing}
           onContinue={() =>
-            submit({ _intent: 'complete-onboarding' }, { method: 'post', replace: true })
+            submit({ intent: 'complete-onboarding' }, { method: 'post', replace: true })
           }
           runtime={loaderData.runtime}
           step={step}
