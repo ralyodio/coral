@@ -585,6 +585,7 @@ impl ConfigStore {
         Ok(result)
     }
 
+    #[cfg(test)]
     fn update_config<T>(
         &self,
         update: impl FnOnce(&mut AppConfig) -> Result<T, AppError>,
@@ -616,11 +617,15 @@ impl ConfigStore {
         })
     }
 
-    pub(crate) fn remove_workspace_config_entries(
+    /// Removes one workspace's config entries without taking the app state
+    /// lock.
+    ///
+    /// Callers must already hold the state lock in exclusive mode.
+    pub(crate) fn remove_workspace_config_entries_unlocked(
         &self,
         workspace_name: &WorkspaceName,
     ) -> Result<Option<DeletedWorkspace>, AppError> {
-        self.update_config(|config| {
+        self.update_config_unlocked(|config| {
             if workspace_name.is_default() {
                 return Err(AppError::FailedPrecondition(
                     "default workspace cannot be removed".to_string(),
@@ -644,6 +649,15 @@ impl ConfigStore {
             }
             Ok(None)
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remove_workspace_config_entries(
+        &self,
+        workspace_name: &WorkspaceName,
+    ) -> Result<Option<DeletedWorkspace>, AppError> {
+        let _lock = self.state_lock_exclusive()?;
+        self.remove_workspace_config_entries_unlocked(workspace_name)
     }
 
     pub(crate) fn list_workspace_sources(
@@ -1573,6 +1587,49 @@ origin = "bundled"
 
         let rendered = std::fs::read_to_string(store.layout.config_file()).expect("read config");
         assert!(!rendered.contains("[workspaces.work.functions.review_queue]"));
+    }
+
+    #[test]
+    fn remove_workspace_config_entries_unlocked_runs_under_a_held_state_lock() {
+        let temp = TempDir::new().expect("temp dir");
+        let store = ConfigStore::new(test_layout(&temp));
+        let workspace_name = WorkspaceName::parse("work").expect("workspace");
+
+        store
+            .create_legacy_workspace_entry_for_tests(&workspace_name)
+            .expect("create legacy workspace entry");
+
+        // `FileLock::exclusive` opens a fresh file descriptor, so re-taking the
+        // state lock here would block the caller against itself. Run the call in
+        // a worker thread with a deadline so a regression fails instead of
+        // hanging the suite.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker_store = store.clone();
+        let worker_workspace_name = workspace_name.clone();
+        std::thread::spawn(move || {
+            let _lock = worker_store
+                .state_lock_exclusive()
+                .expect("hold state lock exclusively");
+            let removed =
+                worker_store.remove_workspace_config_entries_unlocked(&worker_workspace_name);
+            sender
+                .send(removed.is_ok_and(|removed| removed.is_some()))
+                .expect("report unlocked config removal");
+        });
+
+        let removed = receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("unlocked config removal should not take the state lock again");
+        assert!(removed);
+        assert!(
+            store
+                .load_config()
+                .expect("load config")
+                .workspaces
+                .list()
+                .iter()
+                .all(|workspace| workspace.name != workspace_name)
+        );
     }
 
     #[test]
