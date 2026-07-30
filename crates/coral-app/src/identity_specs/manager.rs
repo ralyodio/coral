@@ -1185,7 +1185,7 @@ pub(crate) mod tests {
         name: &str,
         user_identity: &str,
     ) {
-        let owner = IdentityOwner::for_user(UserPrincipal::local());
+        let owner = IdentityOwner::for_user(Principal::local());
         let identity_name = IdentityName::parse(user_identity).unwrap();
         let mut session = db.as_ref();
         let original = session
