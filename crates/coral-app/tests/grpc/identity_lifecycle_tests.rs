@@ -6,7 +6,7 @@ use coral_api::v1::{
     GlobalIdentitySpecScope, Identity, IdentitySpecScope, IdentitySpecType,
     ListUserOwnedIdentitiesRequest, identity_owner, identity_spec_scope,
 };
-use coral_app::{UserPrincipal, UserPrincipalProvider, UserPrincipalProviderError};
+use coral_app::{Principal, UserPrincipalProvider, UserPrincipalProviderError};
 use tonic::{Code, Request, Status};
 
 use crate::harness::GrpcHarness;
@@ -26,13 +26,13 @@ impl UserPrincipalProvider for MetadataUserPrincipalProvider {
     async fn principal_for_metadata(
         &self,
         metadata: &tonic::metadata::MetadataMap,
-    ) -> Result<UserPrincipal, UserPrincipalProviderError> {
+    ) -> Result<Principal, UserPrincipalProviderError> {
         let user_id = metadata
             .get(USER_HEADER)
             .ok_or_else(|| UserPrincipalProviderError::unauthenticated("missing test user"))?
             .to_str()
             .map_err(|_error| UserPrincipalProviderError::unauthenticated("invalid test user"))?;
-        UserPrincipal::for_user(user_id)
+        Principal::parse(user_id, PrincipalKind::User)
             .map_err(|error| UserPrincipalProviderError::unauthenticated(error.to_string()))
     }
 }

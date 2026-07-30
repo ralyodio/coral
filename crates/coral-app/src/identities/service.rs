@@ -128,7 +128,7 @@ impl IdentityServiceApi for IdentityService {
     }
 }
 
-fn request_principal<T>(request: &Request<T>) -> Result<crate::identity::UserPrincipal, Status> {
+fn request_principal<T>(request: &Request<T>) -> Result<crate::identity::Principal, Status> {
     request
         .extensions()
         .get::<RequestContext>()
@@ -196,11 +196,13 @@ fn identity_type_to_proto(identity_type: &str) -> Result<IdentitySpecTypeProto, 
 mod tests {
     use super::*;
     use crate::identities::model::{IdentityName, IdentitySpecReference};
-    use crate::identity::UserPrincipal;
+    use crate::identity::{Principal, PrincipalKind};
 
     #[test]
     fn proto_conversion_preserves_legacy_absent_audience_without_exposing_user_id() {
-        let owner = IdentityOwner::for_user(UserPrincipal::for_user("member-1").expect("user"));
+        let owner = IdentityOwner::for_user(
+            Principal::parse("member-1", PrincipalKind::User).expect("user"),
+        );
         let reference = IdentitySpecReference::from_storage_parts(
             &owner,
             None,
