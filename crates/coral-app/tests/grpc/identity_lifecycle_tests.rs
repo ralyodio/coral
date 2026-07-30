@@ -6,7 +6,7 @@ use coral_api::v1::{
     GlobalIdentitySpecScope, Identity, IdentitySpecScope, IdentitySpecType,
     ListUserOwnedIdentitiesRequest, identity_owner, identity_spec_scope,
 };
-use coral_app::{Principal, UserPrincipalProvider, UserPrincipalProviderError};
+use coral_app::{Principal, PrincipalKind, PrincipalProvider, PrincipalProviderError};
 use tonic::{Code, Request, Status};
 
 use crate::harness::GrpcHarness;
@@ -19,29 +19,28 @@ const IDENTITY_NAME: &str = "example";
 const TOKEN: &str = "write-only-test-token";
 
 #[derive(Debug)]
-struct MetadataUserPrincipalProvider;
+struct MetadataPrincipalProvider;
 
 #[tonic::async_trait]
-impl UserPrincipalProvider for MetadataUserPrincipalProvider {
+impl PrincipalProvider for MetadataPrincipalProvider {
     async fn principal_for_metadata(
         &self,
         metadata: &tonic::metadata::MetadataMap,
-    ) -> Result<Principal, UserPrincipalProviderError> {
+    ) -> Result<Principal, PrincipalProviderError> {
         let user_id = metadata
             .get(USER_HEADER)
-            .ok_or_else(|| UserPrincipalProviderError::unauthenticated("missing test user"))?
+            .ok_or_else(|| PrincipalProviderError::unauthenticated("missing test user"))?
             .to_str()
-            .map_err(|_error| UserPrincipalProviderError::unauthenticated("invalid test user"))?;
+            .map_err(|_error| PrincipalProviderError::unauthenticated("invalid test user"))?;
         Principal::parse(user_id, PrincipalKind::User)
-            .map_err(|error| UserPrincipalProviderError::unauthenticated(error.to_string()))
+            .map_err(|error| PrincipalProviderError::unauthenticated(error.to_string()))
     }
 }
 
 #[tokio::test]
 async fn manages_current_user_fixed_token_identities_without_cross_user_leaks() {
     let harness =
-        GrpcHarness::new_with_user_principal_provider(Arc::new(MetadataUserPrincipalProvider))
-            .await;
+        GrpcHarness::new_with_principal_provider(Arc::new(MetadataPrincipalProvider)).await;
     install_global_spec(&harness).await;
 
     let missing_setup = harness
