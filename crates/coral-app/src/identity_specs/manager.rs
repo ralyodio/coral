@@ -825,7 +825,7 @@ pub(crate) mod tests {
             .with_before_lifecycle_write(Arc::clone(&barrier));
         let gated_identities = IdentityManager::new(Arc::clone(db), Arc::clone(&key_provider))
             .with_before_upsert_gate(barrier);
-        let principal = UserPrincipal::local();
+        let principal = Principal::local();
         let changed_manifest = manifest(&name, "after");
         let (created, replaced) = tokio::time::timeout(Duration::from_secs(10), async {
             tokio::join!(
@@ -894,7 +894,7 @@ pub(crate) mod tests {
             .with_before_lifecycle_write(Arc::clone(&barrier));
         let gated_identities = IdentityManager::new(Arc::clone(db), Arc::clone(&key_provider))
             .with_before_upsert_gate(barrier);
-        let principal = UserPrincipal::local();
+        let principal = Principal::local();
         let (created, deleted) = tokio::time::timeout(Duration::from_secs(10), async {
             tokio::join!(
                 gated_identities.create_or_replace_user_fixed_token(
