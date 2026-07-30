@@ -630,7 +630,7 @@ pub(crate) mod tests {
     use crate::encrypted_document::EncryptedEnvelopeDocument;
     use crate::identities::manager::IdentityManager;
     use crate::identities::model::{IdentityName, IdentityOwner};
-    use crate::identity::UserPrincipal;
+    use crate::identity::Principal;
     use crate::identity::spec_document::{
         encrypt_identity_spec_document, seal_identity_spec_plaintext_for_test,
     };
@@ -866,7 +866,7 @@ pub(crate) mod tests {
             "fixed"
         );
 
-        let principal = UserPrincipal::local();
+        let principal = Principal::local();
         let owner = IdentityOwner::for_user(principal.clone());
         let workspace_owner = IdentityOwner::workspace(workspace.clone());
         let user_identity = format!("user_dependent_{suffix}");
