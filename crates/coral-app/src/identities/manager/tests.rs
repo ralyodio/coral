@@ -8,7 +8,7 @@ use crate::credentials::CredentialsError;
 use crate::credentials::encryption::{CredentialEncryptionKey, CredentialKeyProvider};
 use crate::identities::crypto::{IdentityDocumentBinding, decrypt_identity_document};
 use crate::identities::model::{IdentityName, IdentityOwner};
-use crate::identity::UserPrincipal;
+use crate::identity::{Principal, PrincipalKind};
 use crate::identity_specs::identity_spec_fingerprint;
 use crate::state::db::{
     CoralDb, DbRepos, IdentityDocumentRecord, IdentityRecord, IdentitySpecKey,
@@ -52,7 +52,8 @@ pub(crate) async fn assert_user_global_fixed_token_create_contract(db: &Arc<Cora
         put_spec(db, name, &yaml).await;
     }
 
-    let principal = UserPrincipal::for_user(&format!("user-{suffix}")).expect("principal");
+    let principal =
+        Principal::parse(&format!("user-{suffix}"), PrincipalKind::User).expect("principal");
     let owner = IdentityOwner::for_user(principal.clone());
     let unavailable = Arc::new(TestKeyProvider(Vec::new()));
     let unavailable_manager = IdentityManager::new(db.clone(), unavailable);
