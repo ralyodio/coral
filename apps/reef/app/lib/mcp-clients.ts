@@ -30,3 +30,7 @@ export function mcpClientById(clientId: string | undefined): WebMcpClient | unde
 export function mcpClientInstallPath(clientId: string): string {
   return `/mcp/install/${encodeURIComponent(clientId)}`
 }
+
+export function mcpClientPowerShellInstallPath(clientId: string): string {
+  return `${mcpClientInstallPath(clientId)}/windows`
+}

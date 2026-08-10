@@ -18,4 +18,22 @@ describe('settings loader', () => {
       ]),
     })
   })
+
+  it('loads PowerShell commands for Windows requests', () => {
+    expect(
+      loader({
+        request: new Request('https://reef.example/settings', {
+          headers: { 'sec-ch-ua-platform': '"Windows"' },
+        }),
+      } as Parameters<typeof loader>[0]),
+    ).toEqual({
+      runtime: 'web',
+      mcpClients: expect.arrayContaining([
+        expect.objectContaining({
+          id: 'codex',
+          installCommand: 'irm https://reef.example/mcp/install/codex/windows | iex',
+        }),
+      ]),
+    })
+  })
 })

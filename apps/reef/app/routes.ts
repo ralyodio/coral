@@ -15,6 +15,7 @@ export default [
     // render the app shell.
     route(`${routePattern('workspaceSource')}/oauth-install`, 'routes/source-oauth-install.ts'),
     // Resource route for the bounded MCP-client installer script.
+    route('mcp/install/:clientId/windows', 'routes/mcp-install-windows.ts'),
     route('mcp/install/:clientId', 'routes/mcp-install.ts'),
     route(routePattern('onboarding'), 'routes/onboarding.tsx'),
     layout('routes/app-shell.tsx', [

@@ -6,7 +6,12 @@ import {
   isCoralDesktopBuild,
   type McpClientDescriptor,
 } from '@/lib/coral-desktop'
-import { mcpClientInstallPath, webMcpClients } from '@/lib/mcp-clients'
+import {
+  mcpClientInstallPath,
+  mcpClientPowerShellInstallPath,
+  webMcpClients,
+} from '@/lib/mcp-clients'
+import { isWindowsRequest } from '@/lib/mcp-platform'
 import { addToast } from '@/wax/components/toast'
 
 interface WebSettingsLoaderData {
@@ -32,11 +37,15 @@ export interface DesktopMcpClientData {
 
 export function loader({ request }: Route.LoaderArgs): WebSettingsLoaderData {
   const origin = new URL(request.url).origin
+  const windows = isWindowsRequest(request)
+  const installPath = windows ? mcpClientPowerShellInstallPath : mcpClientInstallPath
   return {
     runtime: 'web',
     mcpClients: webMcpClients.map((client) => ({
       ...client,
-      installCommand: `curl -fsSL ${origin}${mcpClientInstallPath(client.id)} | sh`,
+      installCommand: windows
+        ? `irm ${origin}${installPath(client.id)} | iex`
+        : `curl -fsSL ${origin}${installPath(client.id)} | sh`,
     })),
   }
 }
