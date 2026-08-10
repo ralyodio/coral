@@ -75,9 +75,9 @@ export function Sidebar({
   ] satisfies NavItem[]
   const settingsPath = routePath('settings')
   const isSettingsRoute = Boolean(useMatch({ end: false, path: settingsPath }))
-  const settingsNavItems: NavItem[] = desktop
-    ? [{ icon: 'Settings', label: 'MCP Clients', paths: [settingsPath], to: settingsPath }]
-    : []
+  const settingsNavItems: NavItem[] = [
+    { icon: 'Settings', label: 'MCP Clients', paths: [settingsPath], to: settingsPath },
+  ]
   const navItems = isSettingsRoute ? settingsNavItems : workspaceNavItems
   const settingsHomeButton = (
     <ButtonContainer ariaLabel="Home" as={Link} size="22" to={routePath('home')} variant="bare">
