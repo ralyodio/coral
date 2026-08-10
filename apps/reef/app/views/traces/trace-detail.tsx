@@ -7,7 +7,13 @@ import { Icon } from '@/wax/components/icon'
 import { KeyboardShortcut } from '@/wax/components/keyboard-shortcut'
 import { Typography } from '@/wax/components/typography'
 import { EmptyPage } from '@/components/empty-page'
-import { QueryDetailSummary } from '@/components/query-detail'
+import {
+  QueryDetailSummary,
+  SearchResponseResults,
+  mapTraceSearchResponse,
+  searchResultsTabLabel,
+  type QueryDetailStat,
+} from '@/components/query-detail'
 import { TraceStatus } from '@/generated/coral/v1/traces_pb'
 
 import * as s from './traces.css'
@@ -17,8 +23,14 @@ import type { TracesOutletContext } from './traces-index'
 import { routePath } from '@/routing/routemap'
 import { useTimelineTree, type TimelineRow } from './use-timeline-tree'
 import {
+  shouldClearTimelineInspector,
+  timelineShortcutsEnabled,
+  traceDetailPolicy,
+} from './trace-detail-policy'
+import {
   formatDuration,
   formatDurationFromNanos,
+  formatInvocation,
   formatRows,
   isHttpSpan,
   nanosToMs,
@@ -35,7 +47,7 @@ import {
   type TraceSummaryData,
 } from './trace-utils'
 
-export type DetailTab = 'timeline' | 'api'
+export type DetailTab = 'results' | 'timeline' | 'api'
 type WaterfallTone = 'query' | 'http' | 'span' | 'error'
 
 const WATERFALL_LABEL_PADDING_INLINE_PX = 10
@@ -61,9 +73,17 @@ function focusSpanRow(spanId: string) {
 }
 
 export interface ExtraDetailTab {
+  description?: string
   id: string
   label: string
   content: React.ReactNode
+  show?: boolean
+}
+
+interface DetailTabPresentation {
+  description?: string
+  id: string
+  label: string
   show?: boolean
 }
 
@@ -623,32 +643,67 @@ function TimelineWaterfall({
   )
 }
 
+function DetailStats({ stats }: { stats: QueryDetailStat[] }) {
+  return (
+    <div className={s.statGrid}>
+      {stats.map((stat) => (
+        <div className={s.statCard} key={stat.label}>
+          <Typography.Body variant="tertiary">{stat.label}</Typography.Body>
+          <Typography.BodyLargeStrong>{stat.value}</Typography.BodyLargeStrong>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function tabDomId(tabId: string): string {
+  return tabId.replace(/[^a-zA-Z0-9_-]/g, '-')
+}
+
 function DetailTabs({
   activeTab,
-  extraTabs,
   onTab,
+  tabs,
 }: {
   activeTab: string
-  extraTabs?: ExtraDetailTab[]
   onTab: (tab: string) => void
+  tabs: DetailTabPresentation[]
 }) {
-  const tabs = [
-    { id: 'timeline', label: 'Trace', show: true },
-    ...(extraTabs ?? []).map((tab) => ({ id: tab.id, label: tab.label, show: tab.show ?? true })),
-  ]
   return (
-    <div className={s.tabList}>
+    <div aria-label="Operation details" className={s.tabList}>
       {tabs
-        .filter((tab) => tab.show)
+        .filter((tab) => tab.show ?? true)
         .map((tab) => (
-          <button
-            className={classNames(s.tabTrigger, { [s.tabTriggerActive]: activeTab === tab.id })}
-            key={tab.id}
-            onClick={() => onTab(tab.id)}
-            type="button"
-          >
-            <Typography.BodySmallStrong as="span">{tab.label}</Typography.BodySmallStrong>
-          </button>
+          <div className={s.tabItem} key={tab.id}>
+            <button
+              aria-controls={`trace-detail-panel-${tabDomId(tab.id)}`}
+              aria-pressed={activeTab === tab.id}
+              className={classNames(s.tabTrigger, { [s.tabTriggerActive]: activeTab === tab.id })}
+              id={`trace-detail-tab-${tabDomId(tab.id)}`}
+              onClick={() => onTab(tab.id)}
+              type="button"
+            >
+              <Typography.BodySmallStrong as="span">{tab.label}</Typography.BodySmallStrong>
+            </button>
+            {tab.description ? (
+              <>
+                <Button.IconButton
+                  className={s.tabInfo}
+                  name="Info"
+                  size="22"
+                  tooltipSide="bottom"
+                  tooltipText={tab.description}
+                  variant="bare"
+                />
+                <span
+                  className={s.visuallyHidden}
+                  id={`trace-detail-description-${tabDomId(tab.id)}`}
+                >
+                  {tab.description}
+                </span>
+              </>
+            ) : null}
+          </div>
         ))}
     </div>
   )
@@ -675,13 +730,22 @@ function TraceDetailContent({
   onSelectTrace?: (traceId: string) => void
   traceId: string
 }) {
-  const [activeTab, setActiveTab] = useState<string>('timeline')
+  const summary = detail?.summary ?? initialSummary
+  const searchResultsView = useMemo(
+    () => mapTraceSearchResponse(detail?.searchResponse),
+    [detail?.searchResponse],
+  )
+  const detailPolicy = summary
+    ? traceDetailPolicy(summary, searchResultsTabLabel(searchResultsView))
+    : null
+  const defaultTab = detailPolicy?.defaultTab ?? 'timeline'
+  const [activeTab, setActiveTab] = useState<string>(() => defaultTab)
   const [expandedHttpSpanId, setExpandedHttpSpanId] = useState<string | null>(null)
   const [navigableSpanIds, setNavigableSpanIds] = useState<string[]>([])
   useEffect(() => {
-    setActiveTab('timeline')
+    setActiveTab(defaultTab)
     setExpandedHttpSpanId(null)
-  }, [traceId])
+  }, [defaultTab, traceId])
 
   const selectAdjacentSpan = useCallback(
     (direction: -1 | 1) => {
@@ -764,7 +828,6 @@ function TraceDetailContent({
     () => handleSpanArrowShortcut(1),
     [handleSpanArrowShortcut],
   )
-  const summary = detail?.summary ?? initialSummary
   const httpSpans = useMemo(() => detail?.spans.filter(isHttpSpan) ?? [], [detail?.spans])
   const sources = useMemo(() => sourceNames(detail?.spans ?? []), [detail?.spans])
   const resolvedExtraTabs = useMemo(
@@ -798,7 +861,36 @@ function TraceDetailContent({
     )
   }
 
+  const primaryTabs = detailPolicy?.primaryTabs ?? [{ id: 'timeline', label: 'Trace' }]
+  const tabs: DetailTabPresentation[] = [
+    ...primaryTabs,
+    ...resolvedExtraTabs.map((tab) => ({
+      description: tab.description,
+      id: tab.id,
+      label: tab.label,
+      show: tab.show,
+    })),
+  ]
   const activeExtraTab = resolvedExtraTabs.find((tab) => tab.id === activeTab)
+  const activeTabPresentation = tabs.find((tab) => tab.id === activeTab)
+  const sharedTraceStats: QueryDetailStat[] = [
+    { label: 'Duration', value: formatDurationFromNanos(summary.durationNanos) },
+    { label: 'Rows', value: formatRows(summary) },
+    { label: 'Table scans', value: detail ? sources.length : '—' },
+    { label: 'API requests', value: detail ? httpSpans.length : '—' },
+  ]
+  const searchTraceStats: QueryDetailStat[] = [
+    { label: 'Duration', value: formatDurationFromNanos(summary.durationNanos) },
+    { label: 'Invocation', value: formatInvocation(summary.invocationKind) },
+    { label: 'Table scans', value: detail ? sources.length : '—' },
+    { label: 'API requests', value: detail ? httpSpans.length : '—' },
+  ]
+  const handleTab = (nextTab: string) => {
+    setActiveTab(nextTab)
+    if (shouldClearTimelineInspector(summary, nextTab)) {
+      setExpandedHttpSpanId(null)
+    }
+  }
 
   return (
     <QueryDetailSummary
@@ -852,18 +944,15 @@ function TraceDetailContent({
         </>
       }
       shortcuts={
-        <>
-          <KeyboardShortcut handler={handlePreviousSpanShortcut} shortcut="ArrowUp" />
-          <KeyboardShortcut handler={handleNextSpanShortcut} shortcut="ArrowDown" />
-        </>
+        timelineShortcutsEnabled(summary, activeTab) ? (
+          <>
+            <KeyboardShortcut handler={handlePreviousSpanShortcut} shortcut="ArrowUp" />
+            <KeyboardShortcut handler={handleNextSpanShortcut} shortcut="ArrowDown" />
+          </>
+        ) : undefined
       }
       sql={operationDetailText(summary)}
-      stats={[
-        { label: 'Duration', value: formatDurationFromNanos(summary.durationNanos) },
-        { label: 'Rows', value: formatRows(summary) },
-        { label: 'Table scans', value: detail ? sources.length : '—' },
-        { label: 'API requests', value: detail ? httpSpans.length : '—' },
-      ]}
+      stats={detailPolicy?.traceStatsInSummary ? sharedTraceStats : []}
       statusLabel={statusLabel(summary.status)}
       statusTone={statusTone(summary.status)}
       title={
@@ -882,18 +971,46 @@ function TraceDetailContent({
         </>
       }
     >
-      <DetailTabs activeTab={activeTab} extraTabs={resolvedExtraTabs} onTab={setActiveTab} />
-      <div className={s.tabContent}>
-        {activeTab === 'timeline' &&
-          (detail ? (
-            <TimelineWaterfall
-              expandedHttpSpanId={expandedHttpSpanId}
-              onExpandedHttpSpanIdChange={setExpandedHttpSpanId}
-              onNavigableSpanIdsChange={setNavigableSpanIds}
-              spans={detail.spans}
-              summary={summary}
-            />
-          ) : null)}
+      <DetailTabs activeTab={activeTab} onTab={handleTab} tabs={tabs} />
+      <div
+        aria-describedby={
+          activeTabPresentation?.description
+            ? `trace-detail-description-${tabDomId(activeTab)}`
+            : undefined
+        }
+        aria-labelledby={`trace-detail-tab-${tabDomId(activeTab)}`}
+        className={s.tabContent}
+        id={`trace-detail-panel-${tabDomId(activeTab)}`}
+        role="region"
+        tabIndex={0}
+      >
+        {activeTab === 'results' ? <SearchResponseResults view={searchResultsView} /> : null}
+        {activeTab === 'timeline' ? (
+          detailPolicy?.traceStatsInSummary ? (
+            detail ? (
+              <TimelineWaterfall
+                expandedHttpSpanId={expandedHttpSpanId}
+                onExpandedHttpSpanIdChange={setExpandedHttpSpanId}
+                onNavigableSpanIdsChange={setNavigableSpanIds}
+                spans={detail.spans}
+                summary={summary}
+              />
+            ) : null
+          ) : (
+            <div className={s.extraDetailsContent}>
+              <DetailStats stats={searchTraceStats} />
+              {detail ? (
+                <TimelineWaterfall
+                  expandedHttpSpanId={expandedHttpSpanId}
+                  onExpandedHttpSpanIdChange={setExpandedHttpSpanId}
+                  onNavigableSpanIdsChange={setNavigableSpanIds}
+                  spans={detail.spans}
+                  summary={summary}
+                />
+              ) : null}
+            </div>
+          )
+        ) : null}
         {activeExtraTab?.content}
       </div>
     </QueryDetailSummary>

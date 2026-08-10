@@ -1,14 +1,17 @@
 import {
+  TraceInvocationKind,
   TraceOperationKind,
   TraceStatus,
   type TraceSpan,
   type TraceSummary,
 } from '@/generated/coral/v1/traces_pb'
+import type { TraceSearchResponseData } from '@/components/query-detail/search-response'
 
 export type JsonObject = Record<string, unknown>
 export type TraceSpanData = Omit<TraceSpan, '$typeName' | '$unknown'>
 export type TraceSummaryData = Omit<TraceSummary, '$typeName' | '$unknown'>
 export interface TraceDetailData {
+  searchResponse?: TraceSearchResponseData
   spans: TraceSpanData[]
   summary?: TraceSummaryData
 }
@@ -50,6 +53,12 @@ export function timeAgo(timestamp: number, referenceTimeMs: number): string {
 
 export function formatRows(trace: TraceSummaryData): string {
   return trace.rowCountRecorded ? trace.rowCount.toString() : '—'
+}
+
+export function formatInvocation(invocation: TraceInvocationKind): string {
+  if (invocation === TraceInvocationKind.DIRECT) return 'Direct'
+  if (invocation === TraceInvocationKind.MCP) return 'MCP'
+  return '—'
 }
 
 export function statusLabel(status: TraceStatus): string {
