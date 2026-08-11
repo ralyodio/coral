@@ -3,8 +3,9 @@
 use std::collections::{BTreeMap, HashMap};
 
 use coral_engine::{
-    DatabaseRuntimeBackend, DatabaseRuntimeCatalog, HttpRuntimeCatalog, McpRuntimeCatalog,
-    QuerySource, RuntimeCatalog, RuntimeSourcePackage,
+    DatabaseRuntimeBackend, DatabaseRuntimeCatalog, HttpRuntimeBackend, HttpRuntimeCatalog,
+    HttpRuntimeRelation, McpRuntimeBackend, McpRuntimeCatalog, McpRuntimeRelation, QuerySource,
+    RuntimeCatalog, RuntimeSourcePackage,
 };
 use coral_spec::backends::database::DatabaseSourceManifest;
 use coral_spec::backends::http::{HttpSourceManifest, HttpTableSpec};
@@ -14,12 +15,13 @@ use coral_spec::backends::mcp::{
 use coral_spec::v4::{
     IrExecutionAttachment, Projection, ProjectionKind, ProjectionVisibility, SqlInputExposure,
     SurfaceType, V4MaterializedSource, V4SourceManifest, mcp_projection_arg_specs,
-    openapi_document_metadata, projection_arg_specs, projection_column_specs,
-    projection_filter_specs, request_spec_for_projection, validate_openapi_base_url_template,
+    openapi_document_metadata, operation_sql_schema_name, projection_arg_specs,
+    projection_column_specs, projection_filter_specs, request_spec_for_projection,
+    validate_openapi_base_url_template,
 };
 use coral_spec::{
     PaginationSpec, ParsedTemplate, RequestSpec, ResponseSpec, SourceManifestCommon,
-    SourceTableFunctionKind, SourceTableFunctionSpec, TableCommon,
+    SourceTableFunctionKind, SourceTableFunctionSpec, SqlObjectName, TableCommon,
 };
 use serde::Serialize;
 
@@ -34,7 +36,8 @@ use crate::sources::model::InstalledSource;
 use crate::state::AppStateLayout;
 use crate::workspaces::WorkspaceName;
 
-const RUNTIME_CONTRACT_FINGERPRINT_VERSION: u32 = 3;
+const LEGACY_RUNTIME_CONTRACT_FINGERPRINT_VERSION: u32 = 3;
+const V4_RUNTIME_CONTRACT_FINGERPRINT_VERSION: u32 = 5;
 
 /// Versioned, non-secret identity for the installed runtime contract used by
 /// query execution and derived local state.
@@ -76,8 +79,27 @@ struct RuntimeContractFingerprintInput<'a> {
 #[serde(tag = "backend", rename_all = "snake_case")]
 pub(crate) enum V4RuntimeManifest {
     Database(coral_spec::backends::database::DatabaseSourceManifest),
-    Http(coral_spec::backends::http::HttpSourceManifest),
+    Http(V4HttpRuntimeManifest),
     Mcp(coral_spec::backends::mcp::McpSourceManifest),
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct V4HttpRuntimeManifest {
+    backend_manifest: HttpSourceManifest,
+    relations: Vec<V4HttpRuntimeRelation>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum V4HttpRuntimeRelation {
+    Table {
+        schema_name: String,
+        definition: HttpTableSpec,
+    },
+    TableFunction {
+        schema_name: String,
+        definition: SourceTableFunctionSpec,
+    },
 }
 
 impl V4RuntimeManifest {
@@ -91,12 +113,80 @@ impl V4RuntimeManifest {
                 )
                 .map(RuntimeCatalog::from)
             }
-            Self::Http(manifest) => HttpRuntimeCatalog::try_from_default_catalog_manifest(manifest)
-                .map(RuntimeCatalog::from),
-            Self::Mcp(manifest) => McpRuntimeCatalog::try_from_default_catalog_manifest(manifest)
-                .map(RuntimeCatalog::from),
+            Self::Http(runtime) => runtime.try_into_runtime_catalog().map(RuntimeCatalog::from),
+            Self::Mcp(manifest) => {
+                try_into_v4_mcp_runtime_catalog(manifest).map(RuntimeCatalog::from)
+            }
         };
         catalog.map_err(|error| AppError::FailedPrecondition(error.to_string()))
+    }
+}
+
+fn try_into_v4_mcp_runtime_catalog(
+    manifest: McpSourceManifest,
+) -> Result<McpRuntimeCatalog, coral_engine::CoreError> {
+    let catalog_name = manifest.common.name.clone();
+    let backend = McpRuntimeBackend::from_manifest(&manifest);
+    let relations = manifest
+        .tables
+        .into_iter()
+        .map(|table| {
+            let sql_name = SqlObjectName::new(&catalog_name, "public", table.name());
+            McpRuntimeRelation::try_table(sql_name, table)
+        })
+        .chain(manifest.functions.into_iter().map(|function| {
+            let sql_name = SqlObjectName::new(&catalog_name, "public", function.name());
+            McpRuntimeRelation::try_table_function(sql_name, function)
+        }))
+        .collect::<Result<Vec<_>, _>>()?;
+    McpRuntimeCatalog::try_new(catalog_name, backend, relations)
+}
+
+impl V4HttpRuntimeManifest {
+    #[cfg(test)]
+    fn tables(&self) -> impl Iterator<Item = &HttpTableSpec> {
+        self.relations.iter().filter_map(|relation| match relation {
+            V4HttpRuntimeRelation::Table { definition, .. } => Some(definition),
+            V4HttpRuntimeRelation::TableFunction { .. } => None,
+        })
+    }
+
+    #[cfg(test)]
+    fn functions(&self) -> impl Iterator<Item = &SourceTableFunctionSpec> {
+        self.relations.iter().filter_map(|relation| match relation {
+            V4HttpRuntimeRelation::Table { .. } => None,
+            V4HttpRuntimeRelation::TableFunction { definition, .. } => Some(definition),
+        })
+    }
+
+    fn try_into_runtime_catalog(self) -> Result<HttpRuntimeCatalog, coral_engine::CoreError> {
+        let Self {
+            backend_manifest,
+            relations,
+        } = self;
+        let catalog_name = backend_manifest.common.name.clone();
+        let backend = HttpRuntimeBackend::from_manifest(&backend_manifest);
+        let relations = relations
+            .into_iter()
+            .map(|relation| match relation {
+                V4HttpRuntimeRelation::Table {
+                    schema_name,
+                    definition,
+                } => {
+                    let sql_name =
+                        SqlObjectName::new(&catalog_name, schema_name, definition.name());
+                    HttpRuntimeRelation::try_table(sql_name, definition)
+                }
+                V4HttpRuntimeRelation::TableFunction {
+                    schema_name,
+                    definition,
+                } => {
+                    let sql_name = SqlObjectName::new(&catalog_name, schema_name, &definition.name);
+                    HttpRuntimeRelation::try_table_function(sql_name, definition)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        HttpRuntimeCatalog::try_new(catalog_name, backend, relations)
     }
 }
 
@@ -108,8 +198,13 @@ pub(crate) fn runtime_contract_fingerprint(
     variables: &BTreeMap<String, String>,
     v4_manifest: Option<&V4RuntimeManifest>,
 ) -> Result<RuntimeContractFingerprint, AppError> {
+    let version = if v4_manifest.is_some() {
+        V4_RUNTIME_CONTRACT_FINGERPRINT_VERSION
+    } else {
+        LEGACY_RUNTIME_CONTRACT_FINGERPRINT_VERSION
+    };
     let input = RuntimeContractFingerprintInput {
-        version: RUNTIME_CONTRACT_FINGERPRINT_VERSION,
+        version,
         manifest_sha256: sha256_hex(manifest_yaml.as_bytes()),
         variables,
         v4_runtime_contract: v4_manifest,
@@ -120,7 +215,7 @@ pub(crate) fn runtime_contract_fingerprint(
         ))
     })?;
     Ok(RuntimeContractFingerprint(format!(
-        "v{RUNTIME_CONTRACT_FINGERPRINT_VERSION}:{}",
+        "v{version}:{}",
         sha256_hex(&bytes)
     )))
 }
@@ -246,10 +341,14 @@ pub(crate) fn runtime_manifest_for_v4_database_source(
     }))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "OpenAPI projection assembly keeps the table and function branches visibly symmetric."
+)]
 fn http_manifest_for_surface(
     manifest: &V4SourceManifest,
     materialized: &V4MaterializedSource,
-) -> Result<HttpSourceManifest, AppError> {
+) -> Result<V4HttpRuntimeManifest, AppError> {
     let surface = &manifest.surface;
     let openapi_runtime = surface.openapi_runtime().ok_or_else(|| {
         AppError::FailedPrecondition("DSL v4 surface is not an OpenAPI surface".to_string())
@@ -262,8 +361,7 @@ fn http_manifest_for_surface(
         .iter()
         .map(|operation| (operation.id.as_str(), operation))
         .collect::<HashMap<_, _>>();
-    let mut tables = Vec::new();
-    let mut functions = Vec::new();
+    let mut relations = Vec::new();
     for projection in materialized
         .projections
         .projections
@@ -287,60 +385,70 @@ fn http_manifest_for_surface(
         let request = request_spec_for_projection(projection, operation)
             .map_err(|error| AppError::FailedPrecondition(error.to_string()))?;
         let columns = projection_column_specs(projection);
+        let schema_name = operation_sql_schema_name(operation).to_string();
         match &projection.kind {
             ProjectionKind::Table => {
-                tables.push(HttpTableSpec {
-                    common: TableCommon {
-                        name: projection.name.clone(),
-                        description: projection.description.clone(),
-                        guide: projection.guide.clone(),
-                        require_guide_read: projection.require_guide_read,
-                        filters: projection_filter_specs(projection),
-                        fetch_limit_default: None,
-                        search_limits: projection.search_limits.clone(),
-                        detail_hints: projection.detail_hints.clone(),
-                        columns,
+                relations.push(V4HttpRuntimeRelation::Table {
+                    schema_name,
+                    definition: HttpTableSpec {
+                        common: TableCommon {
+                            name: projection.name.clone(),
+                            description: projection.description.clone(),
+                            guide: projection.guide.clone(),
+                            require_guide_read: projection.require_guide_read,
+                            filters: projection_filter_specs(projection),
+                            fetch_limit_default: None,
+                            search_limits: projection.search_limits.clone(),
+                            detail_hints: projection.detail_hints.clone(),
+                            columns,
+                        },
+                        request,
+                        requests: Vec::new(),
+                        response: response.clone(),
+                        pagination: pagination.clone(),
                     },
-                    request,
-                    requests: Vec::new(),
-                    response: response.clone(),
-                    pagination: pagination.clone(),
                 });
             }
             ProjectionKind::TableFunction { function_kind } => {
-                functions.push(SourceTableFunctionSpec {
-                    name: projection.name.clone(),
-                    kind: *function_kind,
-                    description: projection.description.clone(),
-                    guide: projection.guide.clone(),
-                    require_guide_read: projection.require_guide_read,
-                    fetch_limit_default: None,
-                    search_limits: projection.search_limits.clone(),
-                    detail_hints: projection.detail_hints.clone(),
-                    args: projection_arg_specs(projection),
-                    request,
-                    response,
-                    pagination: pagination.clone(),
-                    columns,
+                relations.push(V4HttpRuntimeRelation::TableFunction {
+                    schema_name,
+                    definition: SourceTableFunctionSpec {
+                        name: projection.name.clone(),
+                        kind: *function_kind,
+                        description: projection.description.clone(),
+                        guide: projection.guide.clone(),
+                        require_guide_read: projection.require_guide_read,
+                        fetch_limit_default: None,
+                        search_limits: projection.search_limits.clone(),
+                        detail_hints: projection.detail_hints.clone(),
+                        args: projection_arg_specs(projection),
+                        request,
+                        response,
+                        pagination: pagination.clone(),
+                        columns,
+                    },
                 });
             }
         }
     }
-    Ok(HttpSourceManifest {
-        common: SourceManifestCommon {
-            dsl_version: manifest.common.dsl_version,
-            name: manifest.common.name.clone(),
-            version: String::new(),
-            description: manifest.common.description.clone(),
-            test_queries: Vec::new(),
+    Ok(V4HttpRuntimeManifest {
+        backend_manifest: HttpSourceManifest {
+            common: SourceManifestCommon {
+                dsl_version: manifest.common.dsl_version,
+                name: manifest.common.name.clone(),
+                version: String::new(),
+                description: manifest.common.description.clone(),
+                test_queries: Vec::new(),
+            },
+            base_url: surface_base_url(manifest, surface, materialized_surface)?,
+            auth: openapi_runtime.auth.clone(),
+            request_headers: openapi_runtime.request_headers.clone(),
+            rate_limit: openapi_runtime.rate_limit.clone(),
+            tables: Vec::new(),
+            functions: Vec::new(),
+            declared_inputs: manifest.declared_inputs.clone(),
         },
-        base_url: surface_base_url(manifest, surface, materialized_surface)?,
-        auth: openapi_runtime.auth.clone(),
-        request_headers: openapi_runtime.request_headers.clone(),
-        rate_limit: openapi_runtime.rate_limit.clone(),
-        tables,
-        functions,
-        declared_inputs: manifest.declared_inputs.clone(),
+        relations,
     })
 }
 
@@ -1248,7 +1356,7 @@ surface:
         )
         .expect("fingerprint without optional provenance");
         assert_eq!(first, without_optional_provenance);
-        assert!(without_optional_provenance.as_str().starts_with("v3:"));
+        assert!(without_optional_provenance.as_str().starts_with("v5:"));
     }
 
     #[test]
@@ -1351,8 +1459,8 @@ surface:
         let Some(V4RuntimeManifest::Http(http)) = component else {
             panic!("expected HTTP component");
         };
-        assert_eq!(http.common.name, "github_v4");
-        let table_pagination = &http.tables.first().expect("http table").pagination;
+        assert_eq!(http.backend_manifest.common.name, "github_v4");
+        let table_pagination = &http.tables().next().expect("http table").pagination;
 
         assert_eq!(table_pagination.mode, PaginationMode::Page);
         assert_eq!(table_pagination.page_param.as_deref(), Some("page"));
@@ -1403,12 +1511,12 @@ surface:
         };
 
         assert_eq!(
-            http.functions.first().expect("http function").guide,
+            http.functions().next().expect("http function").guide,
             "Prefer this function for issue lookup."
         );
         assert!(
-            http.functions
-                .first()
+            http.functions()
+                .next()
                 .expect("http function")
                 .require_guide_read
         );
@@ -1468,12 +1576,12 @@ surface:
         let Some(V4RuntimeManifest::Http(http)) = component else {
             panic!("expected HTTP component");
         };
-        let filters = &http.tables.first().expect("table").common.filters;
+        let filters = &http.tables().next().expect("table").common.filters;
         assert_eq!(filters.len(), 1);
         let filter = filters.first().expect("filter");
         assert_eq!(filter.name, "q");
         assert!(filter.lookup_key);
-        let function = http.functions.first().expect("function");
+        let function = http.functions().next().expect("function");
         assert_eq!(
             function
                 .args
@@ -1522,8 +1630,8 @@ surface:
         let table_http = component_for(published_projection("rest_list_issues"));
         assert_eq!(
             table_http
-                .tables
-                .first()
+                .tables()
+                .next()
                 .expect("HTTP table")
                 .response
                 .rows_path,
@@ -1533,8 +1641,8 @@ surface:
         let function_http = component_for(published_function_projection("rest_list_issues"));
         assert_eq!(
             function_http
-                .functions
-                .first()
+                .functions()
+                .next()
                 .expect("HTTP function")
                 .response
                 .rows_path,
@@ -1738,7 +1846,7 @@ surface:
     }
 
     #[test]
-    fn runtime_source_without_published_projections_has_empty_static_catalog() {
+    fn runtime_source_without_published_projections_has_no_runtime_catalog() {
         let surface = openapi_surface();
         let manifest = V4SourceManifest {
             common: V4SourceCommon {

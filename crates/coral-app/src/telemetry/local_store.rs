@@ -529,6 +529,9 @@ pub(crate) struct TraceQueryTableUsage {
 pub(crate) struct TraceQueryTableFunctionUsage {
     #[serde(rename = "source_name")]
     pub(crate) source: String,
+    /// Absent on spans recorded before function provenance carried the catalog.
+    #[serde(rename = "catalog_name", default)]
+    pub(crate) catalog: Option<String>,
     #[serde(rename = "schema_name")]
     pub(crate) schema: String,
     #[serde(rename = "function_name")]
@@ -2333,7 +2336,7 @@ mod tests {
             "SELECT title FROM github.issues",
             r#"["github"]"#,
             r#"[{"source_name":"github","schema_name":"github","table_name":"issues"}]"#,
-            r#"[{"source_name":"github","schema_name":"github","function_name":"search_issues"}]"#,
+            r#"[{"source_name":"github","schema_name":"github","function_name":"search_issues"},{"source_name":"github_v4","catalog_name":"github_v4","schema_name":"issues","function_name":"search_issues"}]"#,
             15,
         );
 
@@ -2363,9 +2366,19 @@ mod tests {
         assert_eq!(table.source, "github");
         assert_eq!(table.schema, "github");
         assert_eq!(table.table, "issues");
-        assert_eq!(entry.table_functions.len(), 1);
-        let table_function = entry.table_functions.first().expect("table function usage");
-        assert_eq!(table_function.function, "search_issues");
+        assert_eq!(entry.table_functions.len(), 2);
+        let legacy_function = entry
+            .table_functions
+            .first()
+            .expect("legacy function usage");
+        assert_eq!(legacy_function.catalog, None);
+        let catalog_function = entry
+            .table_functions
+            .get(1)
+            .expect("catalog function usage");
+        assert_eq!(catalog_function.catalog.as_deref(), Some("github_v4"));
+        assert_eq!(catalog_function.schema, "issues");
+        assert_eq!(catalog_function.function, "search_issues");
     }
 
     #[test]
