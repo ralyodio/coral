@@ -12,6 +12,7 @@ mod schema;
 mod session;
 mod task_query_state;
 mod task_state;
+mod trace_search_response_state;
 mod transaction;
 mod workspace_state;
 
@@ -28,6 +29,7 @@ pub(crate) use repositories::identity_specs::{
     IdentitySpecDocumentRecord, IdentitySpecKey, IdentitySpecRecord, IdentitySpecScope,
 };
 pub(crate) use repositories::tasks::{TaskCompletionUpdate, TaskLifecycleState};
+pub(crate) use repositories::trace_search_responses::TraceSearchResponseRecord;
 pub(crate) use session::{DbRepos, DbSession};
 #[cfg(test)]
 pub(crate) use task_query_state::TaskQueryRelationRecord;
