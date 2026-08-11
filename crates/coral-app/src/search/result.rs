@@ -81,6 +81,21 @@ pub(crate) struct SearchResponse {
     pub(crate) truncation: SearchTruncation,
 }
 
+/// One successful Search execution plus the identity of its exact operation
+/// span. The identity stays transport-neutral so the service can map the
+/// response once and decide whether to retain that public representation.
+#[derive(Debug, Clone)]
+pub(crate) struct SearchExecution {
+    pub(crate) response: SearchResponse,
+    pub(crate) identity: Option<SearchExecutionIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SearchExecutionIdentity {
+    pub(crate) trace_id: String,
+    pub(crate) span_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct SearchTruncation {
     pub(crate) truncated: bool,

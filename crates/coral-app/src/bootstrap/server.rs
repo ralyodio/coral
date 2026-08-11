@@ -59,6 +59,7 @@ use crate::query::manager::QueryManager;
 use crate::query::service::QueryService;
 use crate::search::manager::SearchManager;
 use crate::search::observed::SearchObservationHandle;
+use crate::search::response_history::{SearchResponseHistory, SearchResponseHistoryWorker};
 use crate::search::service::SearchService;
 use crate::sources::manager::SourceManager;
 use crate::sources::materialization::SourceDiagnosticReporter;
@@ -463,7 +464,8 @@ impl ServerBuilder {
             CatalogDiscovery::new(query_manager.clone()),
             workspace_lifecycle_lock,
         );
-        let trace_components = trace_components_for_store(active_trace_store);
+        let trace_components =
+            init_trace_components(active_trace_store, Arc::clone(&coral_db), &telemetry_config);
         start_server(
             ServerDependencies {
                 source: source_manager,
@@ -510,16 +512,36 @@ fn init_server_telemetry(
 
 fn trace_components_for_store(
     active_trace_store: Option<crate::telemetry::InstalledLocalTraceStore>,
+    search_response_history: SearchResponseHistory,
+    search_response_history_worker: SearchResponseHistoryWorker,
 ) -> TraceServerComponents {
-    active_trace_store.map_or_else(TraceServerComponents::default, |store| {
-        TraceServerComponents {
+    match active_trace_store {
+        None => TraceServerComponents {
+            search_response_history: Some(search_response_history.clone()),
+            search_response_history_worker: Some(search_response_history_worker),
+            ..TraceServerComponents::default()
+        },
+        Some(store) => TraceServerComponents {
             local_trace_store_dir: Some(store.dir.clone()),
             service: Some(TraceService::new(TraceManager::new(
                 store.dir,
                 store.retention,
             ))),
-        }
-    })
+            search_response_history: Some(search_response_history),
+            search_response_history_worker: Some(search_response_history_worker),
+        },
+    }
+}
+
+fn init_trace_components(
+    active_trace_store: Option<crate::telemetry::InstalledLocalTraceStore>,
+    coral_db: Arc<CoralDb>,
+    telemetry_config: &TelemetryConfig,
+) -> TraceServerComponents {
+    let trace_history = &telemetry_config.trace_history;
+    let (history, worker) =
+        SearchResponseHistory::start(coral_db, trace_history.enabled, trace_history.retention());
+    trace_components_for_store(active_trace_store, history, worker)
 }
 
 async fn init_database(layout: &AppStateLayout) -> Result<CoralDb, AppError> {
@@ -560,6 +582,7 @@ pub struct RunningServer {
     local_trace_store_dir: Option<PathBuf>,
     search: SearchManager,
     search_observations: Mutex<Option<SearchObservationHandle>>,
+    search_response_history_worker: Mutex<Option<SearchResponseHistoryWorker>>,
     shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
     task_finished: watch::Receiver<bool>,
     task: Mutex<Option<JoinHandle<Result<(), tonic::transport::Error>>>>,
@@ -633,9 +656,21 @@ impl RunningServer {
             None => Ok(()),
         };
         let search_observations_result = self.shutdown_search_observations().await;
+        self.shutdown_search_response_history().await;
         task_result?;
         search_observations_result?;
         Ok(())
+    }
+
+    async fn shutdown_search_response_history(&self) {
+        let worker = self
+            .search_response_history_worker
+            .lock()
+            .expect("Search response history worker mutex poisoned")
+            .take();
+        if let Some(worker) = worker {
+            worker.shutdown().await;
+        }
     }
 
     async fn shutdown_search_observations(&self) -> Result<(), AppError> {
@@ -675,6 +710,8 @@ impl Drop for RunningServer {
 struct TraceServerComponents {
     service: Option<TraceService>,
     local_trace_store_dir: Option<PathBuf>,
+    search_response_history: Option<SearchResponseHistory>,
+    search_response_history_worker: Option<SearchResponseHistoryWorker>,
 }
 
 struct ServerDependencies {
@@ -697,6 +734,8 @@ async fn start_server(
     let TraceServerComponents {
         service: trace_service,
         local_trace_store_dir,
+        search_response_history,
+        search_response_history_worker,
     } = trace_components;
     let ServerDependencies {
         source,
@@ -720,7 +759,8 @@ async fn start_server(
     let catalog_service = CatalogService::new(query.clone(), task.clone());
     let function_service = FunctionService::new(query.clone());
     let query_service = QueryService::new(query, task.clone());
-    let search_service = SearchService::new(search.clone(), task.clone());
+    let search_service =
+        configured_search_service(search.clone(), task.clone(), search_response_history);
     let feedback_service = FeedbackService::new(feedback, task.clone());
     let task_service = TaskService::new(task);
     let mut application_routes = Routes::default()
@@ -791,10 +831,23 @@ async fn start_server(
         local_trace_store_dir,
         search,
         search_observations: Mutex::new(search_observations),
+        search_response_history_worker: Mutex::new(search_response_history_worker),
         shutdown_tx: Mutex::new(Some(shutdown_tx)),
         task_finished,
         task: Mutex::new(Some(task)),
     })
+}
+
+fn configured_search_service(
+    search: SearchManager,
+    task: TaskManager,
+    response_history: Option<SearchResponseHistory>,
+) -> SearchService {
+    let service = SearchService::new(search, task);
+    match response_history {
+        Some(history) => service.with_response_history(history),
+        None => service,
+    }
 }
 
 fn start_grpc_server(
@@ -1206,6 +1259,7 @@ enabled = false
             local_trace_store_dir: None,
             search,
             search_observations: Mutex::new(Some(search_observations)),
+            search_response_history_worker: Mutex::new(None),
             shutdown_tx: Mutex::new(None),
             task_finished,
             task: Mutex::new(Some(task)),
@@ -1778,6 +1832,8 @@ backend = "unsupported"
             TraceServerComponents {
                 service: Some(trace_service),
                 local_trace_store_dir: None,
+                search_response_history: None,
+                search_response_history_worker: None,
             },
             Arc::new(LocalPrincipalProvider),
             ServerMode::EphemeralGrpc,

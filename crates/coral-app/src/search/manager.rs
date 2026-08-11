@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::time::{Duration, Instant};
 
-use opentelemetry::trace::Status as OtelStatus;
+use opentelemetry::trace::{Status as OtelStatus, TraceContextExt as _};
 use tokio::task;
 use tracing::{Instrument as _, field};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
@@ -31,7 +31,8 @@ use crate::search::provider::{
     LocalSearchWriteCoordinator, SearchExecutionContext, SearchProviderRegistry,
 };
 use crate::search::result::{
-    SearchManagerError, SearchProviderKind, SearchRequest, SearchResponse,
+    SearchExecution, SearchExecutionIdentity, SearchManagerError, SearchProviderKind,
+    SearchRequest, SearchResponse,
 };
 use crate::search::sqlite_store::{
     SqliteSearchCompactionResult, SqliteSearchError, SqliteSearchStore,
@@ -139,7 +140,7 @@ impl SearchManager {
         &self,
         request: &SearchRequest,
         attribution: &QueryAttribution,
-    ) -> Result<SearchResponse, SearchManagerError> {
+    ) -> Result<SearchExecution, SearchManagerError> {
         // The retry/preload path makes this future large enough to trigger
         // Clippy's `large_futures` lint when it is awaited inline.
         Box::pin(run_search_operation(
@@ -646,7 +647,7 @@ async fn run_search_operation<F>(
     request: &SearchRequest,
     task_id: Option<&TaskId>,
     operation: F,
-) -> Result<SearchResponse, SearchManagerError>
+) -> Result<SearchExecution, SearchManagerError>
 where
     F: Future<Output = Result<SearchResponse, SearchManagerError>>,
 {
@@ -669,7 +670,17 @@ where
             );
         }
     }
-    result
+    let identity = search_execution_identity(&span);
+    result.map(|response| SearchExecution { response, identity })
+}
+
+fn search_execution_identity(span: &tracing::Span) -> Option<SearchExecutionIdentity> {
+    let context = span.context();
+    let span_context = context.span().span_context().clone();
+    span_context.is_valid().then(|| SearchExecutionIdentity {
+        trace_id: span_context.trace_id().to_string(),
+        span_id: span_context.span_id().to_string(),
+    })
 }
 
 fn create_search_span(request: &SearchRequest, task_id: Option<&TaskId>) -> tracing::Span {
@@ -835,7 +846,9 @@ mod tests {
         RebuildSearchIndexResponse, SearchMaintenanceResult, SearchMaintenanceState,
     };
     use crate::search::result::{
-        SearchManagerError, SearchProviderKind, SearchRequest, SearchResponse, SearchTruncation,
+        CatalogSurface, FieldValues, SearchManagerError, SearchProviderKind, SearchRequest,
+        SearchResponse, SearchResult, SearchSurfaceId, SearchSurfaceKind, SearchTruncation,
+        SurfaceShape,
     };
     use crate::task::id::TaskId;
     use crate::workspaces::WorkspaceName;
@@ -988,6 +1001,37 @@ mod tests {
         assert!(!format!("{maintenance_span:?}").contains(failure_detail));
     }
 
+    fn response_with_sentinel(request: &SearchRequest, sentinel: &str) -> SearchResponse {
+        SearchResponse {
+            results: vec![SearchResult {
+                surface: CatalogSurface {
+                    id: SearchSurfaceId {
+                        catalog_name: None,
+                        schema_name: "private".to_string(),
+                        name: "surface".to_string(),
+                        kind: SearchSurfaceKind::Table,
+                    },
+                    description: sentinel.to_string(),
+                    guide: sentinel.to_string(),
+                    shape: SurfaceShape::Table { fields: Vec::new() },
+                },
+                providers: vec![SearchProviderKind::CatalogMetadata],
+                matching_values: vec![FieldValues {
+                    field: "secret".to_string(),
+                    values: vec![sentinel.to_string()],
+                }],
+                omitted_matching_field_count: 0,
+            }],
+            provider_statuses: Vec::new(),
+            truncation: SearchTruncation {
+                truncated: false,
+                returned_count: 1,
+                max_results: request.limit,
+                note: "all results returned".to_string(),
+            },
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn search_operation_records_safe_summary_metadata() {
         let exporter = InMemorySpanExporter::default();
@@ -1003,18 +1047,10 @@ mod tests {
         let request = SearchRequest::new(WorkspaceName::default(), raw_query, 7)
             .expect("valid search request");
         let task_id = TaskId::parse("550e8400-e29b-41d4-a716-446655440000").expect("valid task id");
-        let response = SearchResponse {
-            results: Vec::new(),
-            provider_statuses: Vec::new(),
-            truncation: SearchTruncation {
-                truncated: false,
-                returned_count: 0,
-                max_results: request.limit,
-                note: "all results returned".to_string(),
-            },
-        };
+        let response_sentinel = "SENSITIVE_SEARCH_RESPONSE_MARKER";
+        let response = response_with_sentinel(&request, response_sentinel);
 
-        run_search_operation(&request, Some(&task_id), async { Ok(response) })
+        let execution = run_search_operation(&request, Some(&task_id), async { Ok(response) })
             .await
             .expect("search operation");
 
@@ -1024,6 +1060,15 @@ mod tests {
             .iter()
             .find(|span| span.name == "coral.search")
             .expect("coral.search span recorded");
+        let execution_identity = execution.identity.expect("valid Search span identity");
+        assert_eq!(
+            execution_identity.trace_id,
+            search_span.span_context.trace_id().to_string()
+        );
+        assert_eq!(
+            execution_identity.span_id,
+            search_span.span_context.span_id().to_string()
+        );
         let attribute = |name: &str| {
             search_span
                 .attributes
@@ -1081,6 +1126,10 @@ mod tests {
                     .starts_with(coral_telemetry::LOCAL_ONLY_SPAN_ATTRIBUTE_PREFIX)
             }),
             "a subscriber not installed by Coral must not receive local-only attributes"
+        );
+        assert!(
+            !format!("{search_span:?}").contains(response_sentinel),
+            "Search response contents must not be attached to the operation span"
         );
     }
 

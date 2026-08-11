@@ -37,4 +37,7 @@ pub(crate) use task_query_state::{TaskQueryRelationWrite, TaskQueryWrite, TaskQu
 #[cfg(test)]
 pub(crate) use task_state::TaskMutationBarrier;
 pub(crate) use task_state::{TaskCreation, TaskCreationResult};
+pub(crate) use trace_search_response_state::{
+    TraceSearchResponseCapture, TraceSearchResponseInsertResult,
+};
 pub(crate) use transaction::CoralTx;
