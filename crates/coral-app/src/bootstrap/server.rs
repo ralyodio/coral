@@ -512,6 +512,7 @@ fn init_server_telemetry(
 
 fn trace_components_for_store(
     active_trace_store: Option<crate::telemetry::InstalledLocalTraceStore>,
+    coral_db: Arc<CoralDb>,
     search_response_history: SearchResponseHistory,
     search_response_history_worker: SearchResponseHistoryWorker,
 ) -> TraceServerComponents {
@@ -523,10 +524,10 @@ fn trace_components_for_store(
         },
         Some(store) => TraceServerComponents {
             local_trace_store_dir: Some(store.dir.clone()),
-            service: Some(TraceService::new(TraceManager::new(
-                store.dir,
-                store.retention,
-            ))),
+            service: Some(TraceService::new(
+                TraceManager::new(store.dir, store.retention)
+                    .with_search_response_history(coral_db),
+            )),
             search_response_history: Some(search_response_history),
             search_response_history_worker: Some(search_response_history_worker),
         },
@@ -539,9 +540,12 @@ fn init_trace_components(
     telemetry_config: &TelemetryConfig,
 ) -> TraceServerComponents {
     let trace_history = &telemetry_config.trace_history;
-    let (history, worker) =
-        SearchResponseHistory::start(coral_db, trace_history.enabled, trace_history.retention());
-    trace_components_for_store(active_trace_store, history, worker)
+    let (history, worker) = SearchResponseHistory::start(
+        Arc::clone(&coral_db),
+        trace_history.enabled,
+        trace_history.retention(),
+    );
+    trace_components_for_store(active_trace_store, coral_db, history, worker)
 }
 
 async fn init_database(layout: &AppStateLayout) -> Result<CoralDb, AppError> {

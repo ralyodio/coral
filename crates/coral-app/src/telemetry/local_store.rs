@@ -1831,7 +1831,7 @@ fn attributes_match_workspace(attributes_json: &str, workspace_name: &str) -> bo
     workspace_attribute(attributes_json).is_some_and(|workspace| workspace == workspace_name)
 }
 
-fn workspace_attribute(attributes_json: &str) -> Option<String> {
+pub(super) fn workspace_attribute(attributes_json: &str) -> Option<String> {
     parse_attributes(attributes_json)
         .as_ref()
         .and_then(|attributes| attr_string(attributes, WORKSPACE_SPAN_ATTRIBUTE))

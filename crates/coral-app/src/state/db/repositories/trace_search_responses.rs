@@ -6,10 +6,6 @@ use crate::state::db::schema::TraceSearchResponses;
 use crate::state::db::{CoralTx, DbError, DbSession};
 
 #[derive(Clone, PartialEq, Eq, sqlx::FromRow)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "next stack layer wires trace reads")
-)]
 pub(crate) struct TraceSearchResponseRecord {
     pub(crate) response_proto: Option<Vec<u8>>,
     pub(crate) oversized_bytes: Option<i64>,
@@ -40,10 +36,6 @@ where
         Self { session }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "next stack layer wires trace reads")
-    )]
     pub(crate) async fn get(
         &mut self,
         workspace_id: &str,
