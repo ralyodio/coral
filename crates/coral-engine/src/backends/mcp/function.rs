@@ -20,6 +20,7 @@ use crate::backends::shared::json_exec::JsonExec;
 use crate::backends::shared::mapping::convert_items;
 use crate::backends::shared::source_observation::SourceObservationPublishers;
 use crate::backends::{BoundSourceFunctionArg, SourceFunctionProviderFactory};
+use coral_spec::SqlObjectName;
 
 #[derive(Clone)]
 pub(super) struct McpSourceTableFunction {
@@ -29,8 +30,7 @@ pub(super) struct McpSourceTableFunction {
 
 struct McpFunctionState {
     backend: McpSourceClient,
-    source_schema: String,
-    function_name: String,
+    sql_name: SqlObjectName,
     tool_name: String,
     schema: SchemaRef,
     response: ResponseSpec,
@@ -44,8 +44,7 @@ struct McpFunctionState {
 impl std::fmt::Debug for McpSourceTableFunction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpSourceTableFunction")
-            .field("source_schema", &self.state.source_schema)
-            .field("function", &self.state.function_name)
+            .field("sql_name", &self.state.sql_name)
             .field("tool", &self.state.tool_name)
             .finish_non_exhaustive()
     }
@@ -54,8 +53,7 @@ impl std::fmt::Debug for McpSourceTableFunction {
 impl std::fmt::Debug for McpFunctionState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpFunctionState")
-            .field("source_schema", &self.source_schema)
-            .field("function", &self.function_name)
+            .field("sql_name", &self.sql_name)
             .field("tool", &self.tool_name)
             .finish_non_exhaustive()
     }
@@ -64,12 +62,12 @@ impl std::fmt::Debug for McpFunctionState {
 impl McpSourceTableFunction {
     pub(super) fn new(
         backend: McpSourceClient,
-        source_schema: String,
+        sql_name: SqlObjectName,
         function: McpTableFunctionSpec,
         source_observation_publishers: SourceObservationPublishers,
     ) -> Result<Self> {
-        let schema = schema_from_columns(function.columns(), &source_schema, function.name())?;
-        let function_name = function.name().to_string();
+        let schema =
+            schema_from_columns(function.columns(), sql_name.schema_name(), sql_name.name())?;
         let tool_name = function.tool.clone();
         let response = function.common.response.clone();
         let columns = function.common.columns.clone();
@@ -80,8 +78,7 @@ impl McpSourceTableFunction {
             spec: Arc::new(function),
             state: Arc::new(McpFunctionState {
                 backend,
-                source_schema,
-                function_name,
+                sql_name,
                 tool_name,
                 schema,
                 response,
@@ -101,7 +98,7 @@ impl SourceFunctionProviderFactory for McpSourceTableFunction {
     }
 
     fn provider_for_args(&self, args: &[BoundSourceFunctionArg]) -> Result<Arc<dyn TableProvider>> {
-        let arg_values = bind_function_args(&self.state.source_schema, &self.spec, args)?;
+        let arg_values = bind_function_args(self.state.sql_name.schema_name(), &self.spec, args)?;
         Ok(Arc::new(McpFunctionCallTableProvider {
             state: Arc::clone(&self.state),
             arg_values,
@@ -117,8 +114,7 @@ struct McpFunctionCallTableProvider {
 impl std::fmt::Debug for McpFunctionCallTableProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpFunctionCallTableProvider")
-            .field("source_schema", &self.state.source_schema)
-            .field("function", &self.state.function_name)
+            .field("sql_name", &self.state.sql_name)
             .field("arg_values", &self.arg_values.keys())
             .finish_non_exhaustive()
     }
@@ -158,8 +154,8 @@ impl TableProvider for McpFunctionCallTableProvider {
             .collect::<serde_json::Map<_, _>>();
         let fetcher = Arc::new(McpFetchPlan {
             backend: self.state.backend.clone(),
-            source_schema: self.state.source_schema.clone(),
-            relation: self.state.function_name.clone(),
+            source_schema: self.state.sql_name.schema_name().to_string(),
+            relation: self.state.sql_name.name().to_string(),
             tool_name: self.state.tool_name.clone(),
             arguments,
             source_inputs: None,
@@ -180,14 +176,15 @@ impl TableProvider for McpFunctionCallTableProvider {
             })
         };
         let exec = JsonExec::new(
-            &self.state.source_schema,
-            &self.state.function_name,
+            self.state.sql_name.schema_name(),
+            self.state.sql_name.name(),
             self.state.schema.clone(),
             fetcher,
             converter,
             projection.cloned(),
         )?
         .with_source_observation(
+            self.state.sql_name.clone(),
             SourceObservationSurfaceKind::Function,
             Arc::clone(&self.state.source_observation_publishers),
         );

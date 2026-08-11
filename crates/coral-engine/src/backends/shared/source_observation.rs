@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use coral_spec::SqlObjectName;
 use datafusion::arrow::array::RecordBatch;
 
 use crate::{SourceObservationPublisher, SourceObservationSurfaceKind, SourceScanObservation};
@@ -10,16 +11,19 @@ pub(crate) type SourceObservationPublishers = Arc<[Arc<dyn SourceObservationPubl
 
 #[derive(Clone)]
 pub(crate) struct SourceObservationConfig {
+    pub(crate) sql_name: SqlObjectName,
     pub(crate) surface_kind: SourceObservationSurfaceKind,
     pub(crate) publishers: SourceObservationPublishers,
 }
 
 impl SourceObservationConfig {
     pub(crate) fn new(
+        sql_name: SqlObjectName,
         surface_kind: SourceObservationSurfaceKind,
         publishers: SourceObservationPublishers,
     ) -> Option<Self> {
         (!publishers.is_empty()).then_some(Self {
+            sql_name,
             surface_kind,
             publishers,
         })
@@ -38,15 +42,12 @@ pub(crate) fn source_observation_publishers(
 /// backpressure, dropping, and shutdown drainage belong in the app-side
 /// publisher implementation that owns the corresponding lifecycle.
 pub(crate) fn publish_source_scan_batch(
-    source_name: &str,
-    surface_name: &str,
     observation: &SourceObservationConfig,
     batch: &RecordBatch,
 ) {
     let event = SourceScanObservation {
-        source_name,
+        sql_name: &observation.sql_name,
         surface_kind: observation.surface_kind,
-        surface_name,
         batch,
     };
     for publisher in observation.publishers.iter() {
@@ -56,8 +57,7 @@ pub(crate) fn publish_source_scan_batch(
         .is_err()
         {
             tracing::warn!(
-                source = source_name,
-                surface = surface_name,
+                sql_name = %observation.sql_name,
                 "source observation publisher panicked; dropping source-scan observation"
             );
         }
@@ -78,9 +78,8 @@ pub(crate) mod test_support {
     }
 
     pub(crate) struct RecordedSourceObservation {
-        pub(crate) source_name: String,
+        pub(crate) sql_name: SqlObjectName,
         pub(crate) surface_kind: SourceObservationSurfaceKind,
-        pub(crate) surface_name: String,
         pub(crate) column_names: Vec<String>,
         pub(crate) row_count: usize,
         pub(crate) batch: RecordBatch,
@@ -95,9 +94,8 @@ pub(crate) mod test_support {
     impl Clone for RecordedSourceObservation {
         fn clone(&self) -> Self {
             Self {
-                source_name: self.source_name.clone(),
+                sql_name: self.sql_name.clone(),
                 surface_kind: self.surface_kind,
-                surface_name: self.surface_name.clone(),
                 column_names: self.column_names.clone(),
                 row_count: self.row_count,
                 batch: self.batch.clone(),
@@ -111,9 +109,8 @@ pub(crate) mod test_support {
                 .lock()
                 .expect("observations lock")
                 .push(RecordedSourceObservation {
-                    source_name: observation.source_name.to_string(),
+                    sql_name: observation.sql_name.clone(),
                     surface_kind: observation.surface_kind,
-                    surface_name: observation.surface_name.to_string(),
                     column_names: observation
                         .batch
                         .schema()

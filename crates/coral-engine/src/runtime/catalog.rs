@@ -20,7 +20,7 @@ use serde::Serialize;
 use crate::backends::shared::filter_expr::literal_to_string;
 use crate::backends::{
     CatalogColumnFetcher, ColumnInventoryFilter, DatabaseColumnRow, RegisteredSource,
-    RegisteredTable, SourceQualifiedName,
+    SourceQualifiedName,
 };
 use crate::runtime::normalize_catalog_name;
 use crate::runtime::schema_provider::StaticSchemaProvider;
@@ -641,12 +641,9 @@ pub(crate) fn collect_static_tables(active_sources: &[RegisteredSource]) -> Vec<
     let mut tables = system_table_infos();
     tables.extend(active_sources.iter().flat_map(|source| {
         source.tables.iter().map(move |table| TableInfo {
-            catalog_name: source
-                .qualified_name
-                .catalog_name()
-                .map(ToString::to_string),
-            schema_name: registered_table_schema_name(source, table),
-            table_name: table.table_name.clone(),
+            catalog_name: registered_catalog_name(&table.sql_name),
+            schema_name: table.sql_name.schema_name().to_string(),
+            table_name: table.sql_name.name().to_string(),
             description: table.description.clone(),
             guide: table.guide.clone(),
             require_guide_read: table.require_guide_read,
@@ -887,20 +884,9 @@ fn sort_tables(tables: &mut [TableInfo]) {
     });
 }
 
-fn registered_table_schema_name(source: &RegisteredSource, table: &RegisteredTable) -> String {
-    match (&source.qualified_name, &table.schema_name) {
-        (_, Some(schema_name)) | (SourceQualifiedName::Schema(schema_name), None) => {
-            schema_name.clone()
-        }
-        (SourceQualifiedName::Catalog(catalog_name), None) => {
-            debug_assert!(
-                false,
-                "catalog-backed table '{}.{}' must record its SQL schema",
-                catalog_name, table.table_name
-            );
-            catalog_name.clone()
-        }
-    }
+fn registered_catalog_name(sql_name: &coral_spec::SqlObjectName) -> Option<String> {
+    (sql_name.catalog_name() != crate::runtime::DATAFUSION_DEFAULT_CATALOG)
+        .then(|| sql_name.catalog_name().to_string())
 }
 
 /// Collect typed table function metadata for the active runtime.
@@ -955,12 +941,9 @@ fn catalog_table_functions(
                 .table_functions
                 .iter()
                 .map(|function| CatalogTableFunction {
-                    catalog_name: match &source.qualified_name {
-                        SourceQualifiedName::Schema(_) => None,
-                        SourceQualifiedName::Catalog(catalog_name) => Some(catalog_name.clone()),
-                    },
-                    schema_name: function.schema_name.clone(),
-                    function_name: function.function_name.clone(),
+                    catalog_name: registered_catalog_name(&function.sql_name),
+                    schema_name: function.sql_name.schema_name().to_string(),
+                    function_name: function.sql_name.name().to_string(),
                     description: function.description.clone(),
                     guide: function.guide.clone(),
                     require_guide_read: function.require_guide_read,
@@ -1037,13 +1020,9 @@ fn build_tables_table(active_sources: &[RegisteredSource]) -> Result<MemTable> {
         })
         .chain(active_sources.iter().flat_map(|source| {
             source.tables.iter().map(move |table| CatalogTable {
-                catalog_name: source
-                    .qualified_name
-                    .catalog_name()
-                    .unwrap_or_default()
-                    .to_string(),
-                schema_name: registered_table_schema_name(source, table),
-                table_name: table.table_name.clone(),
+                catalog_name: registered_catalog_name(&table.sql_name).unwrap_or_default(),
+                schema_name: table.sql_name.schema_name().to_string(),
+                table_name: table.sql_name.name().to_string(),
                 description: table.description.clone(),
                 guide: table.guide.clone(),
                 require_guide_read: table.require_guide_read,
@@ -1141,13 +1120,9 @@ fn catalog_filter_rows(active_sources: &[RegisteredSource]) -> Vec<CatalogFilter
         .flat_map(|source| {
             source.tables.iter().flat_map(move |table| {
                 table.filters.iter().map(move |filter| CatalogFilter {
-                    catalog_name: source
-                        .qualified_name
-                        .catalog_name()
-                        .unwrap_or_default()
-                        .to_string(),
-                    schema_name: registered_table_schema_name(source, table),
-                    table_name: table.table_name.clone(),
+                    catalog_name: registered_catalog_name(&table.sql_name).unwrap_or_default(),
+                    schema_name: table.sql_name.schema_name().to_string(),
+                    table_name: table.sql_name.name().to_string(),
                     filter_name: filter.name.clone(),
                     filter_mode: filter.mode.clone(),
                     is_required: filter.required,
@@ -1648,12 +1623,9 @@ fn source_catalog_column_rows(active_sources: &[RegisteredSource]) -> Vec<Catalo
         .iter()
         .flat_map(|source| {
             source.tables.iter().flat_map(move |table| {
-                let catalog_name = source
-                    .qualified_name
-                    .catalog_name()
-                    .unwrap_or_default()
-                    .to_string();
-                let schema_name = registered_table_schema_name(source, table);
+                let catalog_name = registered_catalog_name(&table.sql_name).unwrap_or_default();
+                let schema_name = table.sql_name.schema_name().to_string();
+                let table_name = table.sql_name.name().to_string();
                 table
                     .columns
                     .iter()
@@ -1661,7 +1633,7 @@ fn source_catalog_column_rows(active_sources: &[RegisteredSource]) -> Vec<Catalo
                     .map(move |(position, column)| CatalogColumn {
                         catalog_name: catalog_name.clone(),
                         schema_name: schema_name.clone(),
-                        table_name: table.table_name.clone(),
+                        table_name: table_name.clone(),
                         column_name: column.name.clone(),
                         data_type: column.data_type.clone(),
                         is_nullable: column.nullable,
@@ -1749,12 +1721,12 @@ mod tests {
     use datafusion::prelude::{SessionContext, col, lit};
 
     use crate::backends::common::{
-        RegisteredColumn, RegisteredFilter, test_support::StubSourceFunctionFactory,
+        RegisteredColumn, RegisteredFilter, RegisteredInput,
+        test_support::StubSourceFunctionFactory,
     };
     use crate::backends::{
         CatalogColumnFetcher, ColumnInventoryFilter, DatabaseColumnFetcher, DatabaseColumnRow,
-        RegisteredInput, RegisteredSource, RegisteredTable, RegisteredTableFunction,
-        SourceQualifiedName,
+        RegisteredSource, RegisteredTable, RegisteredTableFunction, SourceQualifiedName,
     };
 
     use super::{
@@ -2059,10 +2031,10 @@ mod tests {
 
     fn catalog_source() -> RegisteredSource {
         RegisteredSource {
+            source_name: "warehouse".to_string(),
             qualified_name: SourceQualifiedName::Catalog("warehouse".to_string()),
             tables: vec![RegisteredTable {
-                schema_name: Some("public".to_string()),
-                table_name: "orders".to_string(),
+                sql_name: coral_spec::SqlObjectName::new("warehouse", "public", "orders"),
                 description: String::new(),
                 guide: String::new(),
                 require_guide_read: false,
@@ -2132,11 +2104,15 @@ mod tests {
     fn collect_table_functions_preserves_registered_function_catalog_and_schema() {
         let functions = collect_table_functions(
             &[RegisteredSource {
+                source_name: "source_catalog".to_string(),
                 qualified_name: SourceQualifiedName::Catalog("source_catalog".to_string()),
                 tables: Vec::new(),
                 table_functions: vec![RegisteredTableFunction {
-                    schema_name: "function_schema".to_string(),
-                    function_name: "search".to_string(),
+                    sql_name: coral_spec::SqlObjectName::new(
+                        "source_catalog",
+                        "function_schema",
+                        "search",
+                    ),
                     factory: Arc::new(StubSourceFunctionFactory::default()),
                     kind: coral_spec::SourceTableFunctionKind::Search,
                     description: String::new(),

@@ -194,16 +194,18 @@ impl SourceObservationPublisher for SourceScanObservedValuesPublisher {
 impl SourceScanObservedValuesPublisher {
     fn publish(&self, observation: SourceScanObservation<'_>) {
         let surface_kind = observed_surface_kind(observation.surface_kind);
+        let source_name = observation.sql_name.schema_name();
+        let surface_name = observation.sql_name.name();
         let key = SurfaceKey {
-            source_name: observation.source_name.to_string(),
+            source_name: source_name.to_string(),
             surface_kind,
-            surface_name: observation.surface_name.to_string(),
+            surface_name: surface_name.to_string(),
         };
         let Some(registered) = self.scopes.get(&key) else {
             tracing::debug!(
                 workspace = %self.workspace_name.as_str(),
-                source = %observation.source_name,
-                surface = %observation.surface_name,
+                source = %source_name,
+                surface = %surface_name,
                 "observed-values source-scan observation did not match a known source surface"
             );
             return;
@@ -216,7 +218,7 @@ impl SourceScanObservedValuesPublisher {
                 tracing::debug!(
                     workspace = %self.workspace_name.as_str(),
                     source = %scope.source_name,
-                    surface = %observation.surface_name,
+                    surface = %surface_name,
                     "dropping observed-values source-scan observation because writer queue is full"
                 );
                 return;
@@ -225,7 +227,7 @@ impl SourceScanObservedValuesPublisher {
                 tracing::debug!(
                     workspace = %self.workspace_name.as_str(),
                     source = %scope.source_name,
-                    surface = %observation.surface_name,
+                    surface = %surface_name,
                     "dropping observed-values source-scan observation because writer is stopped"
                 );
                 return;
@@ -245,7 +247,7 @@ impl SourceScanObservedValuesPublisher {
                 tracing::debug!(
                     workspace = %self.workspace_name.as_str(),
                     source = %scope.source_name,
-                    surface = %observation.surface_name,
+                    surface = %surface_name,
                     "dropping observed-values source-scan observation because no candidate fits the serialized job budget"
                 );
                 return;
@@ -254,7 +256,7 @@ impl SourceScanObservedValuesPublisher {
                 tracing::debug!(
                     workspace = %self.workspace_name.as_str(),
                     source = %scope.source_name,
-                    surface = %observation.surface_name,
+                    surface = %surface_name,
                     error = %error,
                     "failed to serialize observed-values source-scan observation"
                 );
@@ -266,7 +268,7 @@ impl SourceScanObservedValuesPublisher {
             source_name: scope.source_name.clone(),
             source_scope_id: scope.source_scope_id.clone(),
             surface_kind,
-            surface_name: observation.surface_name.to_string(),
+            surface_name: surface_name.to_string(),
             payload_json,
             epoch: registered.epoch,
         });
@@ -291,10 +293,10 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use coral_engine::{
-        QuerySource, RuntimeSourceComponent, RuntimeSourcePackage, SourceObservationSurfaceKind,
-        SourceScanObservation,
+        HttpRuntimeBackend, HttpRuntimeCatalog, HttpRuntimeRelation, QuerySource,
+        RuntimeSourcePackage, SourceObservationSurfaceKind, SourceScanObservation,
     };
-    use coral_spec::{DO_NOT_INDEX_COLUMN_METADATA_KEY, parse_source_manifest_yaml};
+    use coral_spec::{DO_NOT_INDEX_COLUMN_METADATA_KEY, SqlObjectName, parse_source_manifest_yaml};
     use serde_json::json;
     use tempfile::tempdir;
     use uuid::Uuid;
@@ -392,10 +394,10 @@ mod tests {
         )
         .expect("batch");
 
+        let sql_name = SqlObjectName::new("datafusion", "github", "issues");
         publisher.publish_source_scan(SourceScanObservation {
-            source_name: "github",
+            sql_name: &sql_name,
             surface_kind: SourceObservationSurfaceKind::Table,
-            surface_name: "issues",
             batch: &batch,
         });
 
@@ -439,10 +441,10 @@ mod tests {
         )
         .expect("batch");
 
+        let sql_name = SqlObjectName::new("datafusion", "github", "issues");
         publisher.publish_source_scan(SourceScanObservation {
-            source_name: "github",
+            sql_name: &sql_name,
             surface_kind: SourceObservationSurfaceKind::Table,
-            surface_name: "issues",
             batch: &batch,
         });
 
@@ -474,10 +476,10 @@ mod tests {
         let batch = title_batch();
 
         for source_name in ["github_v4_rest", "github_v4_mcp", "github_mcp_v4"] {
+            let sql_name = SqlObjectName::new("datafusion", source_name, "list_issues");
             publisher.publish_source_scan(SourceScanObservation {
-                source_name,
+                sql_name: &sql_name,
                 surface_kind: SourceObservationSurfaceKind::Table,
-                surface_name: "list_issues",
                 batch: &batch,
             });
         }
@@ -578,10 +580,10 @@ mod tests {
         )
         .expect("batch");
 
+        let sql_name = SqlObjectName::new("datafusion", "github", "issues");
         publisher.publish_source_scan(SourceScanObservation {
-            source_name: "github",
+            sql_name: &sql_name,
             surface_kind: SourceObservationSurfaceKind::Table,
-            surface_name: "issues",
             batch: &batch,
         });
         handle.shutdown().expect("shutdown drains writer");
@@ -694,27 +696,34 @@ tables:
     /// from the package that carries them. Unreachable through the sources
     /// domain, which is exactly what the tripwire defends against.
     fn divergent_component_query_source() -> QuerySource {
-        QuerySource::from_runtime_components(
-            RuntimeSourcePackage {
-                source_name: "github_v4".to_string(),
-                authored_version: None,
-                description: String::new(),
-                declared_inputs: Vec::new(),
-                test_queries: Vec::new(),
-                identity_requirements: None,
-                components: vec![
-                    http_component("github_v4_rest"),
-                    http_component("github_v4_mcp"),
-                ],
-            },
-            BTreeMap::new(),
-            BTreeMap::new(),
-        )
-        .expect("divergent component query source")
+        runtime_catalog_query_source("github_v4", &["github_v4_rest", "github_v4_mcp"])
     }
 
     fn single_component_query_source(source_name: &str) -> QuerySource {
-        QuerySource::from_runtime_components(
+        runtime_catalog_query_source(source_name, &[source_name])
+    }
+
+    fn runtime_catalog_query_source(source_name: &str, schemas: &[&str]) -> QuerySource {
+        let manifests = schemas
+            .iter()
+            .map(|schema| http_manifest(schema))
+            .collect::<Vec<_>>();
+        let backend = HttpRuntimeBackend::from_manifest(
+            manifests.first().expect("at least one HTTP manifest"),
+        );
+        let relations = manifests
+            .into_iter()
+            .flat_map(|manifest| {
+                let schema_name = manifest.common.name.clone();
+                manifest.tables.into_iter().map(move |table| {
+                    let sql_name = SqlObjectName::new("datafusion", &schema_name, table.name());
+                    HttpRuntimeRelation::try_table(sql_name, table).expect("HTTP relation")
+                })
+            })
+            .collect();
+        let catalog =
+            HttpRuntimeCatalog::try_new("datafusion", backend, relations).expect("HTTP catalog");
+        QuerySource::from_runtime_catalog(
             RuntimeSourcePackage {
                 source_name: source_name.to_string(),
                 authored_version: None,
@@ -722,12 +731,12 @@ tables:
                 declared_inputs: Vec::new(),
                 test_queries: Vec::new(),
                 identity_requirements: None,
-                components: vec![http_component(source_name)],
+                catalog: Some(catalog.into()),
             },
             BTreeMap::new(),
             BTreeMap::new(),
         )
-        .expect("single component query source")
+        .expect("runtime catalog query source")
     }
 
     fn title_batch() -> RecordBatch {
@@ -742,7 +751,7 @@ tables:
         .expect("batch")
     }
 
-    fn http_component(source_name: &str) -> RuntimeSourceComponent {
+    fn http_manifest(source_name: &str) -> coral_spec::backends::http::HttpSourceManifest {
         let yaml = format!(
             r"
 dsl_version: 3
@@ -761,7 +770,7 @@ tables:
 "
         );
         let manifest = parse_source_manifest_yaml(&yaml).expect("component manifest");
-        RuntimeSourceComponent::Http(manifest.as_http().expect("HTTP component").clone())
+        manifest.as_http().expect("HTTP source").clone()
     }
 
     fn wait_for_payloads(layout: &AppStateLayout, workspace: &WorkspaceName) -> Vec<String> {

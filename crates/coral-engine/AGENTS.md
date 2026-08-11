@@ -9,7 +9,7 @@ registration, and query execution.
 
 - backend-specific source adapters
 - query runtime assembly and system catalog registration
-- generic runtime component compilation and composite source registration
+- generic runtime catalog compilation and source registration
 - transport-neutral query results and errors
 
 ## Does Not Own
@@ -30,9 +30,9 @@ registration, and query execution.
   validated source-spec types and backend-specific spec structs from there.
 - Runtime code should work with compiled sources and generic metadata, not app
   policy or transport concerns.
-- Runtime components are the app-to-engine package boundary. Do not add a
+- Runtime catalogs are the app-to-engine package boundary. Do not add a
   backend that reaches back into DSL v4 materialization or authored-manifest
-  types when `coral-app` can assemble existing backend-ready component specs.
+  types when `coral-app` can assemble an existing backend-ready catalog.
 - Reuse database connection pools only through an explicit
   `DatabasePoolRegistry` supplied by the caller and key its pool map directly
   by the workspace-local, unique SQL catalog name. Keep pool implementation in

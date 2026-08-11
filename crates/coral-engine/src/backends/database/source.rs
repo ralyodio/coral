@@ -4,11 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use coral_spec::ParsedTemplate;
 use coral_spec::backends::database::{
-    DatabaseConnectionSpec, DatabaseSourceManifest, MySqlConnectionSpec, PostgresConnectionSpec,
-    SqliteConnectionSpec,
+    DatabaseConnectionSpec, MySqlConnectionSpec, PostgresConnectionSpec, SqliteConnectionSpec,
 };
-use coral_spec::{ParsedTemplate, SourceManifestCommon};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::prelude::SessionContext;
 use datafusion::sql::unparser::dialect::{MySqlDialect, PostgreSqlDialect, SqliteDialect};
@@ -22,24 +21,29 @@ use datafusion_table_providers::util::secrets::to_secret_map;
 use super::catalog::{DatabaseCatalog, DatabaseRelation, build_database_catalog, provider_error};
 use super::columns::{MYSQL_COLUMNS_SQL, POSTGRES_COLUMNS_SQL, SQLITE_COLUMNS_SQL};
 use super::registry::{DatabasePool, DatabasePoolRegistry};
+use crate::DatabaseRuntimeCatalog;
 use crate::backends::shared::template::{RenderContext, render_template};
 use crate::backends::{
-    BackendCatalogRegistration, BackendCompileRequest, BackendRegistration,
-    BackendRegistrationContext, CompiledBackendSource, RegisteredSource, RegisteredTable,
+    BackendCompileRequest, BackendRegistrationContext, CatalogPreparation, CatalogTarget,
+    CompiledBackendCatalog, DiscoveredCatalogDraft, RegisteredSource, RegisteredTable,
     SourceQualifiedName, build_registered_inputs,
 };
+use crate::runtime::error::datafusion_to_core;
 
 /// Budget for building or obtaining a remote pool and loading its inventory.
 const REMOTE_DATABASE_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REMOTE_DATABASE_REGISTRATION_ATTEMPTS: usize = 2;
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(crate) fn compile_manifest(
-    manifest: &DatabaseSourceManifest,
+pub(crate) fn compile_runtime_catalog(
+    catalog: &DatabaseRuntimeCatalog,
     request: &BackendCompileRequest<'_>,
-) -> Box<dyn CompiledBackendSource> {
+) -> Box<dyn CompiledBackendCatalog> {
     Box::new(CompiledDatabaseSource {
-        manifest: manifest.clone(),
+        source_name: request.source.source_name().to_string(),
+        catalog_name: catalog.catalog_name().to_string(),
+        connection: catalog.backend().connection.clone(),
+        declared_inputs: request.source.declared_inputs().to_vec(),
         source_secrets: request.source_secrets.clone(),
         source_variables: request.source_variables.clone(),
         pool_registry: Arc::clone(&request.database_pool_registry),
@@ -47,7 +51,10 @@ pub(crate) fn compile_manifest(
 }
 
 struct CompiledDatabaseSource {
-    manifest: DatabaseSourceManifest,
+    source_name: String,
+    catalog_name: String,
+    connection: DatabaseConnectionSpec,
+    declared_inputs: Vec<coral_spec::ManifestInputSpec>,
     source_secrets: BTreeMap<String, String>,
     source_variables: BTreeMap<String, String>,
     pool_registry: Arc<DatabasePoolRegistry>,
@@ -104,50 +111,48 @@ async fn register_database_catalog(
 }
 
 #[async_trait]
-impl CompiledBackendSource for CompiledDatabaseSource {
-    fn qualified_name(&self) -> SourceQualifiedName {
-        SourceQualifiedName::Catalog(self.manifest.common.name.clone())
-    }
-
-    fn source_name(&self) -> &str {
-        &self.manifest.common.name
-    }
-
-    fn validate_runtime_capabilities(&self) -> DataFusionResult<()> {
-        Ok(())
-    }
-
-    async fn register(
+impl CompiledBackendCatalog for CompiledDatabaseSource {
+    async fn stage(
         &self,
         _ctx: &SessionContext,
         _registration: &BackendRegistrationContext,
-    ) -> DataFusionResult<BackendRegistration> {
+        preparation: &mut CatalogPreparation<'_>,
+    ) -> Result<(), crate::CoreError> {
+        let draft = self
+            .build_discovered_draft()
+            .await
+            .map_err(|error| datafusion_to_core(&error, &[]))?;
+        preparation.stage_discovered(draft)
+    }
+}
+
+impl CompiledDatabaseSource {
+    async fn build_discovered_draft(&self) -> DataFusionResult<DiscoveredCatalogDraft> {
         let resolved_inputs = coral_spec::resolve_inputs(
-            &self.manifest.declared_inputs,
+            &self.declared_inputs,
             &self.source_secrets,
             &self.source_variables,
         );
         let context = RenderContext::source_scoped(&resolved_inputs);
-        let strategy = database_strategy(&self.manifest.connection);
-        let catalog_name = &self.manifest.common.name;
+        let strategy = database_strategy(&self.connection);
+        let catalog_name = &self.catalog_name;
         let database_catalog =
             register_database_catalog(strategy, catalog_name, &context, &self.pool_registry)
                 .await?;
         let source = registered_source_for_catalog(
-            &self.manifest.common,
-            &self.manifest.declared_inputs,
+            &self.source_name,
+            catalog_name,
+            &self.declared_inputs,
             &self.source_secrets,
             &self.source_variables,
             &database_catalog.relations,
         );
 
-        Ok(BackendRegistration {
-            schemas: Vec::new(),
-            catalogs: vec![BackendCatalogRegistration {
-                catalog: database_catalog.provider,
-                source,
-                column_fetcher: database_catalog.column_fetcher,
-            }],
+        Ok(DiscoveredCatalogDraft {
+            target: CatalogTarget::new(catalog_name),
+            provider: database_catalog.provider,
+            source,
+            column_fetcher: Some(database_catalog.column_fetcher),
         })
     }
 }
@@ -397,7 +402,8 @@ FROM sqlite_master
 WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'";
 
 fn registered_source_for_catalog(
-    common: &SourceManifestCommon,
+    source_name: &str,
+    catalog_name: &str,
     declared_inputs: &[coral_spec::ManifestInputSpec],
     source_secrets: &BTreeMap<String, String>,
     source_variables: &BTreeMap<String, String>,
@@ -405,8 +411,9 @@ fn registered_source_for_catalog(
 ) -> RegisteredSource {
     let secret_keys = source_secrets.keys().cloned().collect::<BTreeSet<_>>();
     RegisteredSource {
-        qualified_name: SourceQualifiedName::Catalog(common.name.clone()),
-        tables: database_relation_inventory(relations),
+        source_name: source_name.to_string(),
+        qualified_name: SourceQualifiedName::Catalog(catalog_name.to_string()),
+        tables: database_relation_inventory(catalog_name, relations),
         table_functions: Vec::new(),
         inputs: build_registered_inputs(declared_inputs, source_variables, &secret_keys),
     }
@@ -414,12 +421,18 @@ fn registered_source_for_catalog(
 
 /// Project the Coral-owned relation inventory into public catalog metadata
 /// without constructing table providers or fetching column schemas.
-fn database_relation_inventory(relations: &[DatabaseRelation]) -> Vec<RegisteredTable> {
+fn database_relation_inventory(
+    catalog_name: &str,
+    relations: &[DatabaseRelation],
+) -> Vec<RegisteredTable> {
     relations
         .iter()
         .map(|relation| RegisteredTable {
-            schema_name: Some(relation.schema_name.clone()),
-            table_name: relation.table_name.clone(),
+            sql_name: coral_spec::SqlObjectName::new(
+                catalog_name,
+                &relation.schema_name,
+                &relation.table_name,
+            ),
             description: String::new(),
             guide: String::new(),
             // Discovered from the remote database rather than authored, so
@@ -448,8 +461,9 @@ mod tests {
     };
     use crate::backends::shared::template::RenderContext;
     use crate::{
-        CoralQuery, QueryRuntimeConfig, QuerySource, RuntimeSourceComponent, RuntimeSourcePackage,
-        SourceDecorator, SourceDecoratorError, SourceFailurePolicy, SourceTables,
+        CoralQuery, DatabaseRuntimeBackend, DatabaseRuntimeCatalog, QueryRuntimeConfig,
+        QuerySource, RuntimeSourcePackage, SourceDecorator, SourceDecoratorError,
+        SourceFailurePolicy, SourceTables,
     };
 
     struct AbortOnSourceFailureDecorator;
@@ -473,6 +487,28 @@ mod tests {
             _error: &crate::CoreError,
         ) -> Result<SourceFailurePolicy, SourceDecoratorError> {
             Ok(SourceFailurePolicy::Abort)
+        }
+    }
+
+    struct DiscoveredCatalogDecorator;
+
+    impl SourceDecorator for DiscoveredCatalogDecorator {
+        fn name(&self) -> &'static str {
+            "discovered-catalog"
+        }
+
+        fn supports_discovered_catalogs(&self) -> bool {
+            true
+        }
+
+        fn decorate_source(
+            &mut self,
+            _source: &QuerySource,
+            _tables: SourceTables,
+        ) -> Result<SourceTables, SourceDecoratorError> {
+            Err(SourceDecoratorError::failed_precondition(
+                "discovered providers are already assembled and must not be decorated",
+            ))
         }
     }
 
@@ -532,7 +568,7 @@ mod tests {
             }),
             declared_inputs: Vec::new(),
         };
-        QuerySource::from_runtime_components(
+        QuerySource::from_runtime_catalog(
             RuntimeSourcePackage {
                 source_name: "coral_db".to_string(),
                 authored_version: None,
@@ -540,7 +576,14 @@ mod tests {
                 declared_inputs: Vec::new(),
                 test_queries: Vec::new(),
                 identity_requirements: None,
-                components: vec![RuntimeSourceComponent::Database(database)],
+                catalog: Some(
+                    DatabaseRuntimeCatalog::try_new(
+                        "coral_db",
+                        DatabaseRuntimeBackend::from_manifest(database),
+                    )
+                    .expect("database runtime catalog")
+                    .into(),
+                ),
             },
             BTreeMap::new(),
             BTreeMap::new(),
@@ -689,10 +732,39 @@ mod tests {
         .expect_err("catalog registrations must reject source decorators");
         assert!(
             error.to_string().contains(
-                "registers database catalogs, which source decorator \
+                "has a discovered catalog, which source decorator \
                      'abort-on-source-failure' does not support"
             ),
             "unexpected error: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn database_catalog_registration_accepts_discovered_capable_decorators() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_path = temp.path().join("coral.sqlite");
+        let connection = rusqlite::Connection::open(&db_path).expect("sqlite db");
+        connection
+            .execute("CREATE TABLE users (id INTEGER PRIMARY KEY)", [])
+            .expect("create fixture table");
+        drop(connection);
+        let sources = vec![sqlite_source(db_path.to_string_lossy().into_owned())];
+
+        let mut decorated_config = QueryRuntimeConfig::default();
+        decorated_config
+            .extensions
+            .source_decorators
+            .push(Box::new(DiscoveredCatalogDecorator));
+        let tables = CoralQuery::list_tables(
+            &sources,
+            decorated_config,
+            Some("coral_db"),
+            Some("main"),
+            Some("users"),
+        )
+        .await
+        .expect("supported decorator preserves discovered catalog registration");
+
+        assert_eq!(tables.len(), 1);
     }
 }

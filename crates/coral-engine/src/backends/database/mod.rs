@@ -6,4 +6,4 @@ mod registry;
 mod source;
 
 pub use registry::DatabasePoolRegistry;
-pub(crate) use source::compile_manifest;
+pub(crate) use source::compile_runtime_catalog;

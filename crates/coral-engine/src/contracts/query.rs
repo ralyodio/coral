@@ -9,11 +9,16 @@ use std::sync::Arc;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use coral_spec::backends::database::{DatabaseConnectionSpec, DatabaseSourceManifest};
-use coral_spec::backends::file::FileSourceManifest;
-use coral_spec::backends::http::HttpSourceManifest;
-use coral_spec::backends::mcp::McpSourceManifest;
+use coral_spec::backends::file::{FileSourceManifest, FileTableSpec};
+use coral_spec::backends::http::{AuthSpec, HttpSourceManifest, HttpTableSpec, RateLimitSpec};
+use coral_spec::backends::mcp::{
+    McpServerSpec, McpSourceManifest, McpTableFunctionSpec, McpTableSpec,
+};
 use coral_spec::v4::IdentityRequirements;
-use coral_spec::{ManifestInputSpec, ValidatedSourceManifest};
+use coral_spec::{
+    HeaderSpec, ManifestInputSpec, ParsedTemplate, SourceTableFunctionSpec, SqlObjectName,
+    ValidatedSourceManifest,
+};
 use opentelemetry::Context as OtelContext;
 
 use super::ColumnInfo;
@@ -31,7 +36,7 @@ pub struct QuerySource {
     declared_inputs: Vec<ManifestInputSpec>,
     test_queries: Vec<String>,
     identity_requirements: Option<IdentityRequirements>,
-    components: Vec<RuntimeSourceComponent>,
+    catalog: Option<RuntimeCatalog>,
     variables: BTreeMap<String, String>,
     secrets: BTreeMap<String, String>,
 }
@@ -51,21 +56,125 @@ pub struct RuntimeSourcePackage {
     pub test_queries: Vec<String>,
     /// Source-level request identity requirements, when declared.
     pub identity_requirements: Option<IdentityRequirements>,
-    /// Backend-ready runtime components that make up the logical source.
-    pub components: Vec<RuntimeSourceComponent>,
+    /// The backend-ready runtime catalog owned by the logical source.
+    ///
+    /// This is absent only when a valid DSL v4 materialization publishes no
+    /// relations. Such a source remains loadable but registers no SQL catalog.
+    pub catalog: Option<RuntimeCatalog>,
 }
 
-/// One backend-ready component inside an app-assembled query source package.
-#[derive(Clone)]
-pub enum RuntimeSourceComponent {
-    /// Relational database-backed runtime component.
-    Database(DatabaseSourceManifest),
-    /// HTTP-backed runtime component.
-    Http(HttpSourceManifest),
-    /// File-backed runtime component.
-    File(FileSourceManifest),
-    /// MCP-backed runtime component.
-    Mcp(McpSourceManifest),
+/// Closed runtime catalog matrix inside an app-assembled source package.
+#[derive(Debug, Clone)]
+pub enum RuntimeCatalog {
+    /// A catalog whose complete relation inventory is fixed in the package.
+    Static(StaticRuntimeCatalog),
+    /// A catalog whose backend discovers its schema and relation inventory.
+    Discovered(DatabaseRuntimeCatalog),
+}
+
+/// Supported static backend catalogs.
+#[derive(Debug, Clone)]
+pub enum StaticRuntimeCatalog {
+    /// An HTTP catalog.
+    Http(HttpRuntimeCatalog),
+    /// An MCP catalog.
+    Mcp(McpRuntimeCatalog),
+    /// A file catalog.
+    File(FileRuntimeCatalog),
+}
+
+/// Kind of one relation declared by a static runtime catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeRelationKind {
+    /// A table relation.
+    Table,
+    /// A source-scoped table function.
+    TableFunction,
+}
+
+/// One validated static HTTP catalog.
+#[derive(Debug, Clone)]
+pub struct HttpRuntimeCatalog {
+    catalog_name: String,
+    backend: HttpRuntimeBackend,
+    relations: Vec<HttpRuntimeRelation>,
+}
+
+/// One validated static MCP catalog.
+#[derive(Debug, Clone)]
+pub struct McpRuntimeCatalog {
+    catalog_name: String,
+    backend: McpRuntimeBackend,
+    relations: Vec<McpRuntimeRelation>,
+}
+
+/// One validated static file catalog.
+#[derive(Debug, Clone)]
+pub struct FileRuntimeCatalog {
+    catalog_name: String,
+    relations: Vec<FileRuntimeRelation>,
+}
+
+/// One validated discovered database catalog.
+#[derive(Debug, Clone)]
+pub struct DatabaseRuntimeCatalog {
+    catalog_name: String,
+    backend: DatabaseRuntimeBackend,
+}
+
+/// Source-wide HTTP execution settings without a relation inventory.
+#[derive(Debug, Clone)]
+pub struct HttpRuntimeBackend {
+    pub(crate) dsl_version: u32,
+    pub(crate) base_url: ParsedTemplate,
+    pub(crate) auth: AuthSpec,
+    pub(crate) request_headers: Vec<HeaderSpec>,
+    pub(crate) rate_limit: RateLimitSpec,
+}
+
+/// Source-wide MCP execution settings without a relation inventory.
+#[derive(Debug, Clone)]
+pub struct McpRuntimeBackend {
+    pub(crate) server: McpServerSpec,
+}
+
+/// Source-wide database execution settings for provider discovery.
+#[derive(Debug, Clone)]
+pub struct DatabaseRuntimeBackend {
+    pub(crate) connection: DatabaseConnectionSpec,
+}
+
+/// One HTTP relation whose kind and definition cannot disagree.
+#[derive(Debug, Clone)]
+pub struct HttpRuntimeRelation {
+    sql_name: SqlObjectName,
+    definition: HttpRuntimeRelationDefinition,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum HttpRuntimeRelationDefinition {
+    Table(HttpTableSpec),
+    TableFunction(SourceTableFunctionSpec),
+}
+
+/// One MCP relation whose kind and definition cannot disagree.
+#[derive(Debug, Clone)]
+pub struct McpRuntimeRelation {
+    sql_name: SqlObjectName,
+    definition: McpRuntimeRelationDefinition,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum McpRuntimeRelationDefinition {
+    Table(Box<McpTableSpec>),
+    TableFunction(Box<McpTableFunctionSpec>),
+}
+
+/// One file table relation.
+#[derive(Debug, Clone)]
+pub struct FileRuntimeRelation {
+    sql_name: SqlObjectName,
+    definition: FileTableSpec,
 }
 
 impl fmt::Debug for QuerySource {
@@ -77,42 +186,586 @@ impl fmt::Debug for QuerySource {
             .field("description", &self.description)
             .field("declared_inputs", &self.declared_inputs)
             .field("test_queries", &self.test_queries)
-            .field("components", &self.components)
+            .field("catalog", &self.catalog)
             .field("variables", &self.variables)
             .field("secret_count", &self.secrets.len())
             .finish_non_exhaustive()
     }
 }
 
-impl fmt::Debug for RuntimeSourceComponent {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl HttpRuntimeCatalog {
+    /// Builds a validated static HTTP catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the catalog or relation coordinates are invalid.
+    pub fn try_new(
+        catalog_name: impl Into<String>,
+        backend: HttpRuntimeBackend,
+        relations: Vec<HttpRuntimeRelation>,
+    ) -> Result<Self, crate::CoreError> {
+        let catalog_name = validate_runtime_identifier(catalog_name.into(), "catalog name")?;
+        validate_declared_relation_names(
+            &catalog_name,
+            relations.iter().map(HttpRuntimeRelation::sql_name),
+        )?;
+        Ok(Self {
+            catalog_name,
+            backend,
+            relations,
+        })
+    }
+
+    /// Adapts one validated v3 HTTP manifest to the default `DataFusion` catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a generated runtime coordinate is invalid.
+    pub fn try_from_default_catalog_manifest(
+        manifest: HttpSourceManifest,
+    ) -> Result<Self, crate::CoreError> {
+        let schema_name = manifest.common.name.clone();
+        let backend = HttpRuntimeBackend::from_manifest(&manifest);
+        let mut relations = default_catalog_relations(
+            &schema_name,
+            manifest.tables,
+            |table| table.name(),
+            |sql_name, definition| HttpRuntimeRelation {
+                sql_name,
+                definition: HttpRuntimeRelationDefinition::Table(definition),
+            },
+        );
+        relations.extend(default_catalog_relations(
+            &schema_name,
+            manifest.functions,
+            |function| function.name.as_str(),
+            |sql_name, definition| HttpRuntimeRelation {
+                sql_name,
+                definition: HttpRuntimeRelationDefinition::TableFunction(definition),
+            },
+        ));
+        Self::try_new(
+            crate::runtime::DATAFUSION_DEFAULT_CATALOG,
+            backend,
+            relations,
+        )
+    }
+
+    pub(crate) fn catalog_name(&self) -> &str {
+        &self.catalog_name
+    }
+
+    pub(crate) fn backend(&self) -> &HttpRuntimeBackend {
+        &self.backend
+    }
+
+    /// Returns the catalog's declared HTTP relations.
+    #[must_use]
+    pub fn relations(&self) -> &[HttpRuntimeRelation] {
+        &self.relations
+    }
+
+    /// Returns the catalog's table relations as (SQL name, spec) pairs.
+    pub(crate) fn table_relations(&self) -> impl Iterator<Item = (&SqlObjectName, &HttpTableSpec)> {
+        self.relations
+            .iter()
+            .filter_map(|relation| match relation.definition() {
+                HttpRuntimeRelationDefinition::Table(table) => Some((relation.sql_name(), table)),
+                HttpRuntimeRelationDefinition::TableFunction(_) => None,
+            })
+    }
+
+    /// Returns the catalog's table-function relations as (SQL name, spec) pairs.
+    pub(crate) fn function_relations(
+        &self,
+    ) -> impl Iterator<Item = (&SqlObjectName, &SourceTableFunctionSpec)> {
+        self.relations
+            .iter()
+            .filter_map(|relation| match relation.definition() {
+                HttpRuntimeRelationDefinition::TableFunction(function) => {
+                    Some((relation.sql_name(), function))
+                }
+                HttpRuntimeRelationDefinition::Table(_) => None,
+            })
+    }
+}
+
+impl McpRuntimeCatalog {
+    /// Builds a validated static MCP catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the catalog or relation coordinates are invalid.
+    pub fn try_new(
+        catalog_name: impl Into<String>,
+        backend: McpRuntimeBackend,
+        relations: Vec<McpRuntimeRelation>,
+    ) -> Result<Self, crate::CoreError> {
+        let catalog_name = validate_runtime_identifier(catalog_name.into(), "catalog name")?;
+        validate_declared_relation_names(
+            &catalog_name,
+            relations.iter().map(McpRuntimeRelation::sql_name),
+        )?;
+        Ok(Self {
+            catalog_name,
+            backend,
+            relations,
+        })
+    }
+
+    /// Adapts one validated v3 MCP manifest to the default `DataFusion` catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a generated runtime coordinate is invalid.
+    pub fn try_from_default_catalog_manifest(
+        manifest: McpSourceManifest,
+    ) -> Result<Self, crate::CoreError> {
+        let schema_name = manifest.common.name.clone();
+        let backend = McpRuntimeBackend::from_manifest(&manifest);
+        let mut relations = default_catalog_relations(
+            &schema_name,
+            manifest.tables,
+            |table| table.name(),
+            |sql_name, definition| McpRuntimeRelation {
+                sql_name,
+                definition: McpRuntimeRelationDefinition::Table(Box::new(definition)),
+            },
+        );
+        relations.extend(default_catalog_relations(
+            &schema_name,
+            manifest.functions,
+            |function| function.name(),
+            |sql_name, definition| McpRuntimeRelation {
+                sql_name,
+                definition: McpRuntimeRelationDefinition::TableFunction(Box::new(definition)),
+            },
+        ));
+        Self::try_new(
+            crate::runtime::DATAFUSION_DEFAULT_CATALOG,
+            backend,
+            relations,
+        )
+    }
+
+    pub(crate) fn catalog_name(&self) -> &str {
+        &self.catalog_name
+    }
+
+    pub(crate) fn backend(&self) -> &McpRuntimeBackend {
+        &self.backend
+    }
+
+    /// Returns the catalog's declared MCP relations.
+    #[must_use]
+    pub fn relations(&self) -> &[McpRuntimeRelation] {
+        &self.relations
+    }
+
+    /// Returns the catalog's table relations as (SQL name, spec) pairs.
+    pub(crate) fn table_relations(&self) -> impl Iterator<Item = (&SqlObjectName, &McpTableSpec)> {
+        self.relations
+            .iter()
+            .filter_map(|relation| match relation.definition() {
+                McpRuntimeRelationDefinition::Table(table) => {
+                    Some((relation.sql_name(), table.as_ref()))
+                }
+                McpRuntimeRelationDefinition::TableFunction(_) => None,
+            })
+    }
+
+    /// Returns the catalog's table-function relations as (SQL name, spec) pairs.
+    pub(crate) fn function_relations(
+        &self,
+    ) -> impl Iterator<Item = (&SqlObjectName, &McpTableFunctionSpec)> {
+        self.relations
+            .iter()
+            .filter_map(|relation| match relation.definition() {
+                McpRuntimeRelationDefinition::TableFunction(function) => {
+                    Some((relation.sql_name(), function.as_ref()))
+                }
+                McpRuntimeRelationDefinition::Table(_) => None,
+            })
+    }
+}
+
+impl FileRuntimeCatalog {
+    /// Builds a validated static file catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the catalog or relation coordinates are invalid.
+    pub fn try_new(
+        catalog_name: impl Into<String>,
+        relations: Vec<FileRuntimeRelation>,
+    ) -> Result<Self, crate::CoreError> {
+        let catalog_name = validate_runtime_identifier(catalog_name.into(), "catalog name")?;
+        validate_declared_relation_names(
+            &catalog_name,
+            relations.iter().map(FileRuntimeRelation::sql_name),
+        )?;
+        Ok(Self {
+            catalog_name,
+            relations,
+        })
+    }
+
+    /// Adapts one validated v3 file manifest to the default `DataFusion` catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a generated runtime coordinate is invalid.
+    pub fn try_from_default_catalog_manifest(
+        manifest: FileSourceManifest,
+    ) -> Result<Self, crate::CoreError> {
+        let schema_name = manifest.common.name.clone();
+        let relations = default_catalog_relations(
+            &schema_name,
+            manifest.tables,
+            |table| table.name(),
+            |sql_name, definition| FileRuntimeRelation {
+                sql_name,
+                definition,
+            },
+        );
+        Self::try_new(crate::runtime::DATAFUSION_DEFAULT_CATALOG, relations)
+    }
+
+    pub(crate) fn catalog_name(&self) -> &str {
+        &self.catalog_name
+    }
+
+    /// Returns the catalog's declared file tables.
+    #[must_use]
+    pub fn relations(&self) -> &[FileRuntimeRelation] {
+        &self.relations
+    }
+}
+
+impl DatabaseRuntimeCatalog {
+    /// Builds a validated discovered database catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the catalog coordinate is invalid.
+    pub fn try_new(
+        catalog_name: impl Into<String>,
+        backend: DatabaseRuntimeBackend,
+    ) -> Result<Self, crate::CoreError> {
+        Ok(Self {
+            catalog_name: validate_runtime_identifier(catalog_name.into(), "catalog name")?,
+            backend,
+        })
+    }
+
+    pub(crate) fn catalog_name(&self) -> &str {
+        &self.catalog_name
+    }
+
+    pub(crate) fn backend(&self) -> &DatabaseRuntimeBackend {
+        &self.backend
+    }
+}
+
+impl RuntimeCatalog {
+    /// Returns this runtime catalog's SQL catalog coordinate.
+    #[must_use]
+    pub fn catalog_name(&self) -> &str {
         match self {
-            Self::Database(manifest) => {
-                let provider = match &manifest.connection {
-                    DatabaseConnectionSpec::Postgres(_) => "postgres",
-                    DatabaseConnectionSpec::MySql(_) => "mysql",
-                    DatabaseConnectionSpec::Sqlite(_) => "sqlite",
-                };
-                formatter
-                    .debug_struct("Database")
-                    .field("source_name", &manifest.common.name)
-                    .field("provider", &provider)
-                    .finish_non_exhaustive()
-            }
-            Self::Http(manifest) => formatter
-                .debug_struct("Http")
-                .field("source_name", &manifest.common.name)
-                .finish_non_exhaustive(),
-            Self::File(manifest) => formatter
-                .debug_struct("File")
-                .field("source_name", &manifest.common.name)
-                .finish_non_exhaustive(),
-            Self::Mcp(manifest) => formatter
-                .debug_struct("Mcp")
-                .field("source_name", &manifest.common.name)
-                .finish_non_exhaustive(),
+            Self::Static(StaticRuntimeCatalog::Http(catalog)) => catalog.catalog_name(),
+            Self::Static(StaticRuntimeCatalog::Mcp(catalog)) => catalog.catalog_name(),
+            Self::Static(StaticRuntimeCatalog::File(catalog)) => catalog.catalog_name(),
+            Self::Discovered(catalog) => catalog.catalog_name(),
         }
     }
+
+    /// Visits every relation declared by this catalog.
+    ///
+    /// Discovered catalogs have no package-declared relations and therefore
+    /// do not invoke the visitor.
+    pub fn for_each_declared_relation(
+        &self,
+        mut visit: impl FnMut(&SqlObjectName, RuntimeRelationKind),
+    ) {
+        match self {
+            Self::Discovered(_) => {}
+            Self::Static(StaticRuntimeCatalog::Http(catalog)) => {
+                for relation in catalog.relations() {
+                    let kind = if relation.is_table_function() {
+                        RuntimeRelationKind::TableFunction
+                    } else {
+                        RuntimeRelationKind::Table
+                    };
+                    visit(relation.sql_name(), kind);
+                }
+            }
+            Self::Static(StaticRuntimeCatalog::Mcp(catalog)) => {
+                for relation in catalog.relations() {
+                    let kind = if relation.is_table_function() {
+                        RuntimeRelationKind::TableFunction
+                    } else {
+                        RuntimeRelationKind::Table
+                    };
+                    visit(relation.sql_name(), kind);
+                }
+            }
+            Self::Static(StaticRuntimeCatalog::File(catalog)) => {
+                for relation in catalog.relations() {
+                    visit(relation.sql_name(), RuntimeRelationKind::Table);
+                }
+            }
+        }
+    }
+}
+
+impl From<HttpRuntimeCatalog> for RuntimeCatalog {
+    fn from(catalog: HttpRuntimeCatalog) -> Self {
+        Self::Static(StaticRuntimeCatalog::Http(catalog))
+    }
+}
+
+impl From<McpRuntimeCatalog> for RuntimeCatalog {
+    fn from(catalog: McpRuntimeCatalog) -> Self {
+        Self::Static(StaticRuntimeCatalog::Mcp(catalog))
+    }
+}
+
+impl From<FileRuntimeCatalog> for RuntimeCatalog {
+    fn from(catalog: FileRuntimeCatalog) -> Self {
+        Self::Static(StaticRuntimeCatalog::File(catalog))
+    }
+}
+
+impl From<DatabaseRuntimeCatalog> for RuntimeCatalog {
+    fn from(catalog: DatabaseRuntimeCatalog) -> Self {
+        Self::Discovered(catalog)
+    }
+}
+
+impl HttpRuntimeBackend {
+    /// Removes relation inventory and source ownership from a validated HTTP manifest.
+    #[must_use]
+    pub fn from_manifest(manifest: &HttpSourceManifest) -> Self {
+        Self {
+            dsl_version: manifest.common.dsl_version,
+            base_url: manifest.base_url.clone(),
+            auth: manifest.auth.clone(),
+            request_headers: manifest.request_headers.clone(),
+            rate_limit: manifest.rate_limit.clone(),
+        }
+    }
+}
+
+impl McpRuntimeBackend {
+    /// Removes relation inventory and source ownership from a validated MCP manifest.
+    #[must_use]
+    pub fn from_manifest(manifest: &McpSourceManifest) -> Self {
+        Self {
+            server: manifest.server.clone(),
+        }
+    }
+}
+
+impl DatabaseRuntimeBackend {
+    /// Removes source ownership metadata from a validated database manifest.
+    #[must_use]
+    pub fn from_manifest(manifest: DatabaseSourceManifest) -> Self {
+        Self {
+            connection: manifest.connection,
+        }
+    }
+}
+
+impl HttpRuntimeRelation {
+    /// Builds one validated HTTP table relation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SQL coordinate is invalid.
+    pub fn try_table(
+        sql_name: SqlObjectName,
+        definition: HttpTableSpec,
+    ) -> Result<Self, crate::CoreError> {
+        validate_runtime_sql_name(&sql_name)?;
+        Ok(Self {
+            sql_name,
+            definition: HttpRuntimeRelationDefinition::Table(definition),
+        })
+    }
+
+    /// Builds one validated HTTP table-function relation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SQL coordinate is invalid.
+    pub fn try_table_function(
+        sql_name: SqlObjectName,
+        definition: SourceTableFunctionSpec,
+    ) -> Result<Self, crate::CoreError> {
+        validate_runtime_sql_name(&sql_name)?;
+        Ok(Self {
+            sql_name,
+            definition: HttpRuntimeRelationDefinition::TableFunction(definition),
+        })
+    }
+
+    /// Returns this relation's complete SQL identity.
+    #[must_use]
+    pub fn sql_name(&self) -> &SqlObjectName {
+        &self.sql_name
+    }
+
+    /// Returns whether this relation is a table function.
+    #[must_use]
+    pub fn is_table_function(&self) -> bool {
+        matches!(
+            self.definition,
+            HttpRuntimeRelationDefinition::TableFunction(_)
+        )
+    }
+
+    pub(crate) fn definition(&self) -> &HttpRuntimeRelationDefinition {
+        &self.definition
+    }
+}
+
+impl McpRuntimeRelation {
+    /// Builds one validated MCP table relation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SQL coordinate is invalid.
+    pub fn try_table(
+        sql_name: SqlObjectName,
+        definition: McpTableSpec,
+    ) -> Result<Self, crate::CoreError> {
+        validate_runtime_sql_name(&sql_name)?;
+        Ok(Self {
+            sql_name,
+            definition: McpRuntimeRelationDefinition::Table(Box::new(definition)),
+        })
+    }
+
+    /// Builds one validated MCP table-function relation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SQL coordinate is invalid.
+    pub fn try_table_function(
+        sql_name: SqlObjectName,
+        definition: McpTableFunctionSpec,
+    ) -> Result<Self, crate::CoreError> {
+        validate_runtime_sql_name(&sql_name)?;
+        Ok(Self {
+            sql_name,
+            definition: McpRuntimeRelationDefinition::TableFunction(Box::new(definition)),
+        })
+    }
+
+    /// Returns this relation's complete SQL identity.
+    #[must_use]
+    pub fn sql_name(&self) -> &SqlObjectName {
+        &self.sql_name
+    }
+
+    /// Returns whether this relation is a table function.
+    #[must_use]
+    pub fn is_table_function(&self) -> bool {
+        matches!(
+            self.definition,
+            McpRuntimeRelationDefinition::TableFunction(_)
+        )
+    }
+
+    pub(crate) fn definition(&self) -> &McpRuntimeRelationDefinition {
+        &self.definition
+    }
+}
+
+impl FileRuntimeRelation {
+    /// Builds one validated file table relation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SQL coordinate is invalid.
+    pub fn try_table(
+        sql_name: SqlObjectName,
+        definition: FileTableSpec,
+    ) -> Result<Self, crate::CoreError> {
+        validate_runtime_sql_name(&sql_name)?;
+        Ok(Self {
+            sql_name,
+            definition,
+        })
+    }
+
+    /// Returns this table's complete SQL identity.
+    #[must_use]
+    pub fn sql_name(&self) -> &SqlObjectName {
+        &self.sql_name
+    }
+
+    pub(crate) fn definition(&self) -> &FileTableSpec {
+        &self.definition
+    }
+}
+
+fn validate_declared_relation_names<'a>(
+    catalog_name: &str,
+    sql_names: impl IntoIterator<Item = &'a SqlObjectName>,
+) -> Result<(), crate::CoreError> {
+    let mut names = std::collections::BTreeSet::new();
+    for sql_name in sql_names {
+        if sql_name.catalog_name() != catalog_name {
+            return Err(crate::CoreError::InvalidInput(format!(
+                "runtime relation '{}' belongs to catalog '{}', not containing catalog '{catalog_name}'",
+                sql_name,
+                sql_name.catalog_name()
+            )));
+        }
+        if !names.insert(sql_name.clone()) {
+            return Err(crate::CoreError::InvalidInput(format!(
+                "runtime catalog '{catalog_name}' declares duplicate relation '{sql_name}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Names one manifest spec list under the default `DataFusion` catalog.
+///
+/// Every v3 adapter derives relation coordinates through this single rule so
+/// default-catalog naming cannot drift between backends.
+fn default_catalog_relations<Spec, Relation>(
+    schema_name: &str,
+    specs: Vec<Spec>,
+    spec_name: impl Fn(&Spec) -> &str,
+    relation: impl Fn(SqlObjectName, Spec) -> Relation,
+) -> Vec<Relation> {
+    specs
+        .into_iter()
+        .map(|spec| {
+            let sql_name = SqlObjectName::new(
+                crate::runtime::DATAFUSION_DEFAULT_CATALOG,
+                schema_name,
+                spec_name(&spec),
+            );
+            relation(sql_name, spec)
+        })
+        .collect()
+}
+
+fn validate_runtime_sql_name(sql_name: &SqlObjectName) -> Result<(), crate::CoreError> {
+    validate_runtime_identifier(sql_name.catalog_name().to_string(), "catalog name")?;
+    validate_runtime_identifier(sql_name.schema_name().to_string(), "schema name")?;
+    validate_runtime_identifier(sql_name.name().to_string(), "relation name")?;
+    Ok(())
+}
+
+fn validate_runtime_identifier(value: String, label: &str) -> Result<String, crate::CoreError> {
+    coral_spec::validate_identifier(&value, &format!("runtime {label}"))
+        .map_err(|error| crate::CoreError::InvalidInput(error.to_string()))?;
+    Ok(value)
 }
 
 impl QuerySource {
@@ -133,12 +786,18 @@ impl QuerySource {
 
     #[must_use]
     /// Builds one source selection from a validated v3 source manifest.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a caller bypasses manifest validation and supplies invalid
+    /// runtime coordinates.
     pub fn from_manifest(
         source_spec: &ValidatedSourceManifest,
         variables: BTreeMap<String, String>,
         secrets: BTreeMap<String, String>,
     ) -> Self {
-        let components = components_from_manifest(source_spec);
+        let catalog = catalog_from_manifest(source_spec)
+            .expect("validated v3 manifests produce a valid default runtime catalog");
         Self {
             source_name: source_spec.schema_name().to_string(),
             authored_version: source_spec.source_version().map(ToString::to_string),
@@ -146,18 +805,18 @@ impl QuerySource {
             declared_inputs: source_spec.declared_inputs().to_vec(),
             test_queries: source_spec.test_queries().to_vec(),
             identity_requirements: None,
-            components,
+            catalog: Some(catalog),
             variables,
             secrets,
         }
     }
 
-    /// Builds one source selection from app-assembled runtime components.
+    /// Builds one source selection from app-assembled runtime catalog.
     ///
     /// # Errors
     ///
     /// Returns [`CoreError`](crate::CoreError) when the package is invalid.
-    pub fn from_runtime_components(
+    pub fn from_runtime_catalog(
         package: RuntimeSourcePackage,
         variables: BTreeMap<String, String>,
         secrets: BTreeMap<String, String>,
@@ -167,15 +826,6 @@ impl QuerySource {
                 "runtime source package source_name must not be empty".to_string(),
             ));
         }
-        for component in &package.components {
-            let schema_name = component.source_name();
-            if schema_name.trim().is_empty() {
-                return Err(crate::CoreError::InvalidInput(format!(
-                    "runtime source package '{}' has a component with an empty schema name",
-                    package.source_name
-                )));
-            }
-        }
         validate_runtime_source_identity_requirements(&package)?;
         Ok(Self {
             source_name: package.source_name,
@@ -184,7 +834,7 @@ impl QuerySource {
             declared_inputs: package.declared_inputs,
             test_queries: package.test_queries,
             identity_requirements: package.identity_requirements,
-            components: package.components,
+            catalog: package.catalog,
             variables,
             secrets,
         })
@@ -235,9 +885,9 @@ impl QuerySource {
     }
 
     #[must_use]
-    /// Returns backend-ready runtime components supplied by the app.
-    pub fn components(&self) -> &[RuntimeSourceComponent] {
-        &self.components
+    /// Returns the backend-ready runtime catalog supplied by the app, if any.
+    pub fn catalog(&self) -> Option<&RuntimeCatalog> {
+        self.catalog.as_ref()
     }
 
     #[must_use]
@@ -248,16 +898,40 @@ impl QuerySource {
     /// share one flat namespace.
     pub fn schema_names(&self) -> Vec<&str> {
         let mut names = Vec::new();
-        for component in &self.components {
-            if matches!(component, RuntimeSourceComponent::Database(_)) {
-                continue;
-            }
-            let name = component.source_name();
-            if !names.contains(&name) {
-                names.push(name);
-            }
+        let Some(catalog) = &self.catalog else {
+            return vec![self.source_name()];
+        };
+        if catalog.catalog_name() != crate::runtime::DATAFUSION_DEFAULT_CATALOG {
+            return names;
         }
-        if self.components.is_empty() {
+        match catalog {
+            RuntimeCatalog::Static(StaticRuntimeCatalog::Http(catalog)) => {
+                push_distinct_schema_names(
+                    &mut names,
+                    catalog
+                        .relations()
+                        .iter()
+                        .map(HttpRuntimeRelation::sql_name),
+                );
+            }
+            RuntimeCatalog::Static(StaticRuntimeCatalog::Mcp(catalog)) => {
+                push_distinct_schema_names(
+                    &mut names,
+                    catalog.relations().iter().map(McpRuntimeRelation::sql_name),
+                );
+            }
+            RuntimeCatalog::Static(StaticRuntimeCatalog::File(catalog)) => {
+                push_distinct_schema_names(
+                    &mut names,
+                    catalog
+                        .relations()
+                        .iter()
+                        .map(FileRuntimeRelation::sql_name),
+                );
+            }
+            RuntimeCatalog::Discovered(_) => {}
+        }
+        if names.is_empty() {
             names.push(self.source_name());
         }
         names
@@ -268,17 +942,15 @@ impl QuerySource {
     /// components. Tables of these components resolve as
     /// `catalog.schema.table`, with schemas discovered at registration time.
     pub fn catalog_names(&self) -> Vec<&str> {
-        let mut names = Vec::new();
-        for component in &self.components {
-            let RuntimeSourceComponent::Database(manifest) = component else {
-                continue;
-            };
-            let name = manifest.common.name.as_str();
-            if !names.contains(&name) {
-                names.push(name);
-            }
+        let Some(catalog) = &self.catalog else {
+            return Vec::new();
+        };
+        let name = catalog.catalog_name();
+        if name == crate::runtime::DATAFUSION_DEFAULT_CATALOG {
+            Vec::new()
+        } else {
+            vec![name]
         }
-        names
     }
 
     #[must_use]
@@ -294,20 +966,6 @@ impl QuerySource {
     }
 }
 
-impl RuntimeSourceComponent {
-    #[must_use]
-    /// Returns the name this component publishes at runtime: a schema name,
-    /// or a catalog name for database components.
-    pub fn source_name(&self) -> &str {
-        match self {
-            Self::Database(manifest) => &manifest.common.name,
-            Self::Http(manifest) => &manifest.common.name,
-            Self::File(manifest) => &manifest.common.name,
-            Self::Mcp(manifest) => &manifest.common.name,
-        }
-    }
-}
-
 fn validate_runtime_source_identity_requirements(
     package: &RuntimeSourcePackage,
 ) -> Result<(), crate::CoreError> {
@@ -315,34 +973,54 @@ fn validate_runtime_source_identity_requirements(
         return Ok(());
     }
 
-    for component in &package.components {
-        let RuntimeSourceComponent::Http(manifest) = component else {
-            return Err(crate::CoreError::InvalidInput(format!(
-                "runtime source package '{}' declares identity_requirements, but identity_requirements require every runtime component to be a DSL v4 HTTP component",
-                package.source_name
-            )));
-        };
-        if manifest.common.dsl_version != 4 {
-            return Err(crate::CoreError::InvalidInput(format!(
-                "runtime source package '{}' declares identity_requirements, but component '{}' uses DSL v{} HTTP instead of DSL v4 HTTP",
-                package.source_name, manifest.common.name, manifest.common.dsl_version
-            )));
-        }
+    let Some(RuntimeCatalog::Static(StaticRuntimeCatalog::Http(http))) = &package.catalog else {
+        return Err(crate::CoreError::InvalidInput(format!(
+            "runtime source package '{}' declares identity_requirements, but identity_requirements require a DSL v4 HTTP catalog",
+            package.source_name
+        )));
+    };
+    let backend = http.backend();
+    if backend.dsl_version != 4 {
+        return Err(crate::CoreError::InvalidInput(format!(
+            "runtime source package '{}' declares identity_requirements, but catalog '{}' uses DSL v{} HTTP instead of DSL v4 HTTP",
+            package.source_name,
+            http.catalog_name(),
+            backend.dsl_version
+        )));
     }
     Ok(())
 }
 
-fn components_from_manifest(source_spec: &ValidatedSourceManifest) -> Vec<RuntimeSourceComponent> {
+fn catalog_from_manifest(
+    source_spec: &ValidatedSourceManifest,
+) -> Result<RuntimeCatalog, crate::CoreError> {
     if let Some(http) = source_spec.as_http() {
-        return vec![RuntimeSourceComponent::Http(http.clone())];
+        return HttpRuntimeCatalog::try_from_default_catalog_manifest(http.clone())
+            .map(RuntimeCatalog::from);
     }
     if let Some(file) = source_spec.as_file() {
-        return vec![RuntimeSourceComponent::File(file.clone())];
+        return FileRuntimeCatalog::try_from_default_catalog_manifest(file.clone())
+            .map(RuntimeCatalog::from);
     }
     if let Some(mcp) = source_spec.as_mcp() {
-        return vec![RuntimeSourceComponent::Mcp(mcp.clone())];
+        return McpRuntimeCatalog::try_from_default_catalog_manifest(mcp.clone())
+            .map(RuntimeCatalog::from);
     }
-    Vec::new()
+    Err(crate::CoreError::InvalidInput(
+        "validated DSL v4 manifests require app-owned runtime catalog assembly".to_string(),
+    ))
+}
+
+fn push_distinct_schema_names<'a>(
+    names: &mut Vec<&'a str>,
+    sql_names: impl IntoIterator<Item = &'a SqlObjectName>,
+) {
+    for sql_name in sql_names {
+        let schema_name = sql_name.schema_name();
+        if !names.contains(&schema_name) {
+            names.push(schema_name);
+        }
+    }
 }
 
 /// One source-spec validation query executed during source validation.
@@ -1220,10 +1898,14 @@ impl QueryTableUsage {
     }
 }
 
-/// One source-scoped table function referenced by a query.
+/// One source-owned table function referenced by a query.
+///
+/// The optional catalog distinguishes three-part v4 calls from two-part v3
+/// and UDF calls.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct QueryTableFunctionUsage {
     source: String,
+    catalog: Option<String>,
     schema: String,
     function: String,
 }
@@ -1231,13 +1913,18 @@ pub struct QueryTableFunctionUsage {
 impl QueryTableFunctionUsage {
     #[must_use]
     /// Builds one source-scoped table function usage entry.
+    ///
+    /// `catalog_name` is `None` for `schema.function(...)` and populated for
+    /// `catalog.schema.function(...)`.
     pub fn new(
         source_name: impl Into<String>,
+        catalog_name: Option<&str>,
         schema_name: impl Into<String>,
         function_name: impl Into<String>,
     ) -> Self {
         Self {
             source: source_name.into(),
+            catalog: catalog_name.map(ToString::to_string),
             schema: schema_name.into(),
             function: function_name.into(),
         }
@@ -1247,6 +1934,12 @@ impl QueryTableFunctionUsage {
     /// Returns the installed source name that owns this table function.
     pub fn source_name(&self) -> &str {
         &self.source
+    }
+
+    #[must_use]
+    /// Returns the SQL catalog for this function, or `None` for two-part calls.
+    pub fn catalog_name(&self) -> Option<&str> {
+        self.catalog.as_deref()
     }
 
     #[must_use]
@@ -1271,7 +1964,10 @@ mod tests {
     use coral_spec::v4::{AcceptedIdentityRequirement, IdentityRequirements};
     use serde_json::json;
 
-    use super::{MemorySize, QuerySource, RuntimeSourceComponent, RuntimeSourcePackage};
+    use super::{
+        HttpRuntimeCatalog, MemorySize, QuerySource, RuntimeCatalog, RuntimeSourcePackage,
+        StaticRuntimeCatalog,
+    };
 
     #[test]
     fn memory_size_parses_binary_units() {
@@ -1302,7 +1998,7 @@ mod tests {
 
     #[test]
     fn runtime_source_package_rejects_identity_requirements_on_non_v4_http_component() {
-        let error = QuerySource::from_runtime_components(
+        let error = QuerySource::from_runtime_catalog(
             RuntimeSourcePackage {
                 source_name: "github".to_string(),
                 authored_version: None,
@@ -1310,7 +2006,11 @@ mod tests {
                 declared_inputs: Vec::new(),
                 test_queries: Vec::new(),
                 identity_requirements: Some(identity_requirements()),
-                components: vec![RuntimeSourceComponent::Http(http_manifest())],
+                catalog: Some(
+                    HttpRuntimeCatalog::try_from_default_catalog_manifest(http_manifest())
+                        .expect("HTTP runtime catalog")
+                        .into(),
+                ),
             },
             BTreeMap::new(),
             BTreeMap::new(),
@@ -1319,7 +2019,7 @@ mod tests {
 
         assert!(
             error.to_string().contains(
-                "declares identity_requirements, but component 'github' uses DSL v3 HTTP instead of DSL v4 HTTP"
+                "declares identity_requirements, but catalog 'datafusion' uses DSL v3 HTTP instead of DSL v4 HTTP"
             ),
             "unexpected error: {error}"
         );
@@ -1331,7 +2031,7 @@ mod tests {
         manifest.common.dsl_version = 4;
         let requirements = identity_requirements();
 
-        let source = QuerySource::from_runtime_components(
+        let source = QuerySource::from_runtime_catalog(
             RuntimeSourcePackage {
                 source_name: "github_v4".to_string(),
                 authored_version: None,
@@ -1339,7 +2039,11 @@ mod tests {
                 declared_inputs: Vec::new(),
                 test_queries: Vec::new(),
                 identity_requirements: Some(requirements.clone()),
-                components: vec![RuntimeSourceComponent::Http(manifest)],
+                catalog: Some(
+                    HttpRuntimeCatalog::try_from_default_catalog_manifest(manifest)
+                        .expect("HTTP runtime catalog")
+                        .into(),
+                ),
             },
             BTreeMap::new(),
             BTreeMap::new(),
@@ -1362,8 +2066,9 @@ mod tests {
         assert!(source.identity_requirements().is_none());
         assert!(source.identity_selection_context().is_none());
         assert!(matches!(
-            source.components(),
-            [RuntimeSourceComponent::Http(http)] if http.common.dsl_version == 3
+            source.catalog(),
+            Some(RuntimeCatalog::Static(StaticRuntimeCatalog::Http(http)))
+                if http.backend().dsl_version == 3
         ));
     }
 

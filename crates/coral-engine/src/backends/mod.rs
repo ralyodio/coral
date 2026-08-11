@@ -3,13 +3,13 @@
 //! # Module layout conventions for backends
 //!
 //! Each backend (`http`, `mcp`, `file`, ...) implements
-//! [`CompiledBackendSource`] and registers tables, table functions, and
+//! [`CompiledBackendCatalog`] and stages tables, table functions, and
 //! metadata at runtime. A new backend module should match the shape below
 //! where applicable:
 //!
 //! | File | Purpose | When to include |
 //! |---|---|---|
-//! | `mod.rs` | Module entry. `CompiledBackendSource` impl, `compile_source` / `compile_manifest`, internal module declarations. | always |
+//! | `mod.rs` | Module entry. `CompiledBackendCatalog` impl, `compile_source` / `compile_manifest`, internal module declarations. | always |
 //! | `provider.rs` | `DataFusion` `TableProvider` implementation. | if the backend exposes tables |
 //! | `function.rs` | Source-function provider factory and `build_registered_table_function` wiring. | only if the backend exposes table functions |
 //! | `client.rs` | Configured stateful wrapper (the value the rest of the backend talks to) and any transport-abstracting trait. | if the backend has a per-source client; skip if config is per-table (file backend) |
@@ -72,23 +72,24 @@ use std::sync::Arc;
 
 use crate::{
     BoundRequestIdentityHttpAuthenticator, CoreError, QuerySource, RequestAuthenticator,
-    RuntimeSourceComponent, SourceInputResolver, SourceObservationPublisher,
+    RuntimeCatalog, SourceInputResolver, SourceObservationPublisher, StaticRuntimeCatalog,
 };
 #[cfg(test)]
 use coral_spec::ValidatedSourceManifest;
 
 pub(crate) mod common;
-mod composite;
+mod preparation;
 pub(crate) use common::{
-    BackendCatalogRegistration, BackendCompileRequest, BackendRegistration,
-    BackendRegistrationContext, BackendSchemaRegistration, BoundSourceFunctionArg,
-    BoundSourceFunctionValue, CatalogColumnFetcher, ColumnInventoryFilter, CompiledBackendSource,
-    DatabaseColumnFetcher, DatabaseColumnRow, RegisteredInput, RegisteredSource, RegisteredTable,
+    BackendCompileRequest, BackendRegistrationContext, BoundSourceFunctionArg,
+    BoundSourceFunctionValue, CatalogColumnFetcher, CatalogPublication, CatalogRegistration,
+    CatalogTarget, ColumnInventoryFilter, CompiledBackendCatalog, DatabaseColumnFetcher,
+    DatabaseColumnRow, DiscoveredCatalogDraft, RegisteredSource, RegisteredTable,
     RegisteredTableFunction, RegisteredTableFunctionArgument, SourceFunctionProviderFactory,
-    SourceQualifiedName, build_registered_inputs, build_registered_table,
+    SourceQualifiedName, StaticCatalogDraft, build_registered_inputs, build_registered_table,
     build_registered_table_function, registered_columns_from_schema, registered_columns_from_specs,
     required_filter_names, schema_from_columns, validate_lookup_key_filter_backend_support,
 };
+pub(crate) use preparation::CatalogPreparation;
 
 pub(crate) mod database;
 pub(crate) mod file;
@@ -104,13 +105,7 @@ pub(crate) fn compile_query_source(
     source_input_resolver: Option<Arc<dyn SourceInputResolver>>,
     source_observation_publishers: &[Arc<dyn SourceObservationPublisher>],
     request_identity_http_authenticators: &HashMap<String, BoundRequestIdentityHttpAuthenticator>,
-) -> Result<Box<dyn CompiledBackendSource>, CoreError> {
-    if source.components().is_empty() {
-        return Err(CoreError::FailedPrecondition(format!(
-            "source '{}' has no runtime components",
-            source.source_name()
-        )));
-    }
+) -> Result<Option<Box<dyn CompiledBackendCatalog>>, CoreError> {
     let request = BackendCompileRequest {
         source,
         runtime_context,
@@ -122,26 +117,21 @@ pub(crate) fn compile_query_source(
         source_observation_publishers,
         request_identity_http_authenticators,
     };
-    let compiled_components = source
-        .components()
-        .iter()
-        .map(|component| compile_component(component, &request))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(composite::compile_source(
-        source.source_name().to_string(),
-        compiled_components,
-    ))
+    source
+        .catalog()
+        .map(|catalog| compile_catalog(catalog, &request))
+        .transpose()
 }
 
-fn compile_component(
-    component: &RuntimeSourceComponent,
+fn compile_catalog(
+    catalog: &RuntimeCatalog,
     request: &BackendCompileRequest<'_>,
-) -> Result<Box<dyn CompiledBackendSource>, CoreError> {
-    match component {
-        RuntimeSourceComponent::Database(manifest) => {
-            Ok(database::compile_manifest(manifest, request))
+) -> Result<Box<dyn CompiledBackendCatalog>, CoreError> {
+    match catalog {
+        RuntimeCatalog::Discovered(catalog) => {
+            Ok(database::compile_runtime_catalog(catalog, request))
         }
-        RuntimeSourceComponent::Http(manifest) => {
+        RuntimeCatalog::Static(StaticRuntimeCatalog::Http(catalog)) => {
             let request_identity_http_authenticator = request
                 .source
                 .identity_requirements()
@@ -158,14 +148,18 @@ fn compile_component(
                         })
                 })
                 .transpose()?;
-            Ok(http::compile_manifest(
-                manifest,
+            Ok(http::compile_runtime_catalog(
+                catalog,
                 request,
                 request_identity_http_authenticator,
             ))
         }
-        RuntimeSourceComponent::File(manifest) => Ok(file::compile_manifest(manifest, request)),
-        RuntimeSourceComponent::Mcp(manifest) => Ok(mcp::compile_manifest(manifest, request)),
+        RuntimeCatalog::Static(StaticRuntimeCatalog::File(catalog)) => {
+            Ok(file::compile_runtime_catalog(catalog, request))
+        }
+        RuntimeCatalog::Static(StaticRuntimeCatalog::Mcp(catalog)) => {
+            Ok(mcp::compile_runtime_catalog(catalog, request))
+        }
     }
 }
 
@@ -175,7 +169,7 @@ pub(crate) fn compile_source_manifest(
     source_secrets: std::collections::BTreeMap<String, String>,
     source_variables: std::collections::BTreeMap<String, String>,
     runtime_context: &crate::QueryRuntimeContext,
-) -> Result<Box<dyn CompiledBackendSource>, CoreError> {
+) -> Result<Box<dyn CompiledBackendCatalog>, CoreError> {
     let request_authenticators: HashMap<String, Arc<dyn RequestAuthenticator>> = HashMap::new();
     let source = QuerySource::new(
         manifest.clone(),
@@ -202,7 +196,7 @@ pub(crate) fn compile_source_manifest(
 pub(crate) fn compile_validated_manifest(
     manifest: &ValidatedSourceManifest,
     request: &BackendCompileRequest<'_>,
-) -> Result<Box<dyn CompiledBackendSource>, CoreError> {
+) -> Result<Box<dyn CompiledBackendCatalog>, CoreError> {
     if let Some(http_manifest) = manifest.as_http() {
         return Ok(http::compile_manifest(http_manifest, request, None));
     }

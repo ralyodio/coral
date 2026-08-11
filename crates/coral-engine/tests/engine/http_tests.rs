@@ -9,10 +9,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use coral_engine::{
-    CoralQuery, CoreError, EngineExtensions, QueryParameterValue, QueryParameters,
-    QueryRuntimeConfig, QueryRuntimeContext, RequestAuthenticator, RequestAuthenticatorError,
-    StatusCode,
+    CoralQuery, CoreError, EngineExtensions, HttpRuntimeBackend, HttpRuntimeCatalog,
+    HttpRuntimeRelation, QueryParameterValue, QueryParameters, QueryRuntimeConfig,
+    QueryRuntimeContext, QuerySource, RequestAuthenticator, RequestAuthenticatorError,
+    RuntimeSourcePackage, StatusCode,
 };
+use coral_spec::{SqlObjectName, parse_source_manifest_value};
 use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -106,6 +108,45 @@ fn function_only_search_manifest(name: &str, base_url: &str) -> Value {
         .expect("manifest is an object")
         .remove("tables");
     manifest
+}
+
+fn build_v4_http_function_source(
+    manifest: Value,
+    catalog_name: &str,
+    schema_name: &str,
+) -> QuerySource {
+    let mut manifest = parse_source_manifest_value(manifest)
+        .expect("HTTP manifest")
+        .as_http()
+        .expect("HTTP source")
+        .clone();
+    manifest.common.dsl_version = 4;
+    let function = manifest.functions[0].clone();
+    let relation = HttpRuntimeRelation::try_table_function(
+        SqlObjectName::new(catalog_name, schema_name, &function.name),
+        function,
+    )
+    .expect("runtime function");
+    let catalog = HttpRuntimeCatalog::try_new(
+        catalog_name,
+        HttpRuntimeBackend::from_manifest(&manifest),
+        vec![relation],
+    )
+    .expect("runtime catalog");
+    QuerySource::from_runtime_catalog(
+        RuntimeSourcePackage {
+            source_name: catalog_name.to_string(),
+            authored_version: Some("1.0.0".to_string()),
+            description: String::new(),
+            declared_inputs: Vec::new(),
+            test_queries: Vec::new(),
+            identity_requirements: None,
+            catalog: Some(catalog.into()),
+        },
+        BTreeMap::new(),
+        BTreeMap::new(),
+    )
+    .expect("query source")
 }
 
 async fn spawn_raw_http_path_recorder(
@@ -1312,6 +1353,65 @@ async fn execution_provenance_records_source_scoped_table_functions() {
     assert_eq!(function.schema_name(), "search");
     assert_eq!(function.function_name(), "search_issues");
     assert_eq!(provenance.row_count(), 1);
+}
+
+#[tokio::test]
+async fn v4_http_table_function_uses_three_part_identity_and_provenance() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/search/issues"))
+        .and(query_param("q", "flaky"))
+        .and(query_param_is_missing("search_type"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [{"title": "Flaky cleanup", "score": 9.5}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let source = build_v4_http_function_source(
+        function_only_search_manifest("github_v4", &server.uri()),
+        "github_v4",
+        "issues",
+    );
+    let sql = "SELECT title, score FROM github_v4.issues.search_issues(q => 'flaky')";
+
+    let execution = CoralQuery::execute_sql(std::slice::from_ref(&source), test_runtime(), sql)
+        .await
+        .expect("three-part function call");
+    assert_eq!(
+        execution_to_rows(&execution),
+        vec![json!({"title": "Flaky cleanup", "score": 9.5})]
+    );
+    let function = &execution.provenance().table_functions()[0];
+    assert_eq!(function.source_name(), "github_v4");
+    assert_eq!(function.catalog_name(), Some("github_v4"));
+    assert_eq!(function.schema_name(), "issues");
+    assert_eq!(function.function_name(), "search_issues");
+
+    let catalog = CoralQuery::list_catalog(
+        std::slice::from_ref(&source),
+        test_runtime(),
+        Some("github_v4"),
+        Some("issues"),
+    )
+    .await
+    .expect("function catalog");
+    let catalog_function = catalog.table_functions.first().expect("cataloged function");
+    assert_eq!(catalog_function.catalog_name.as_deref(), Some("github_v4"));
+    assert_eq!(catalog_function.schema_name, "issues");
+    assert_eq!(catalog_function.function_name, "search_issues");
+
+    let error = CoralQuery::execute_sql(
+        &[source],
+        test_runtime(),
+        "SELECT title FROM issues.search_issues(q => 'flaky')",
+    )
+    .await
+    .expect_err("former two-part function name must fail");
+    assert!(
+        error.to_string().contains("github_v4.issues.search_issues"),
+        "error should provide the canonical identity: {error}"
+    );
 }
 
 #[tokio::test]

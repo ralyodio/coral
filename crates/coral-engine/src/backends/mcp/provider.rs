@@ -22,10 +22,11 @@ use crate::backends::shared::filter_expr::{classify_filter_pushdown, extract_fil
 use crate::backends::shared::json_exec::JsonExec;
 use crate::backends::shared::mapping::convert_items;
 use crate::backends::shared::source_observation::SourceObservationPublishers;
+use coral_spec::SqlObjectName;
 
 pub(super) struct McpTableProvider {
     backend: McpSourceClient,
-    source_schema: String,
+    sql_name: SqlObjectName,
     source_inputs: Arc<McpSourceInputs>,
     table: Arc<McpTableSpec>,
     schema: SchemaRef,
@@ -35,8 +36,7 @@ pub(super) struct McpTableProvider {
 impl std::fmt::Debug for McpTableProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpTableProvider")
-            .field("source_schema", &self.source_schema)
-            .field("table", &self.table.name())
+            .field("sql_name", &self.sql_name)
             .field("tool", &self.table.tool)
             .finish_non_exhaustive()
     }
@@ -45,15 +45,15 @@ impl std::fmt::Debug for McpTableProvider {
 impl McpTableProvider {
     pub(super) fn new(
         backend: McpSourceClient,
-        source_schema: String,
+        sql_name: SqlObjectName,
         source_inputs: Arc<McpSourceInputs>,
         table: McpTableSpec,
         source_observation_publishers: SourceObservationPublishers,
     ) -> Result<Self> {
-        let schema = schema_from_columns(table.columns(), &source_schema, table.name())?;
+        let schema = schema_from_columns(table.columns(), sql_name.schema_name(), sql_name.name())?;
         Ok(Self {
             backend,
-            source_schema,
+            sql_name,
             source_inputs,
             table: Arc::new(table),
             schema,
@@ -99,13 +99,13 @@ impl TableProvider for McpTableProvider {
                             .ok_or_else(|| {
                                 DataFusionError::Plan(format!(
                                     "{}.{} filter '{}' is missing its MCP tool binding",
-                                    self.source_schema,
+                                    self.sql_name.schema_name(),
                                     self.table.name(),
                                     filter.name
                                 ))
                             })?;
                     let typed = coerce_filter_value(
-                        &self.source_schema,
+                        self.sql_name.schema_name(),
                         self.table.name(),
                         &filter.name,
                         filter.data_type,
@@ -116,7 +116,7 @@ impl TableProvider for McpTableProvider {
                 None if filter.required => {
                     return Err(DataFusionError::External(Box::new(
                         McpProviderQueryError::MissingRequiredFilter {
-                            schema: self.source_schema.clone(),
+                            schema: self.sql_name.schema_name().to_string(),
                             table: self.table.name().to_string(),
                             column: filter.name.clone(),
                         },
@@ -138,7 +138,7 @@ impl TableProvider for McpTableProvider {
 
         let fetcher = Arc::new(McpFetchPlan {
             backend: self.backend.clone(),
-            source_schema: self.source_schema.clone(),
+            source_schema: self.sql_name.schema_name().to_string(),
             relation: self.table.name().to_string(),
             tool_name: self.table.tool.clone(),
             arguments,
@@ -164,14 +164,15 @@ impl TableProvider for McpTableProvider {
         };
 
         let exec = JsonExec::new(
-            &self.source_schema,
-            self.table.name(),
+            self.sql_name.schema_name(),
+            self.sql_name.name(),
             schema,
             fetcher,
             converter,
             projection.cloned(),
         )?
         .with_source_observation(
+            self.sql_name.clone(),
             SourceObservationSurfaceKind::Table,
             Arc::clone(&self.source_observation_publishers),
         );

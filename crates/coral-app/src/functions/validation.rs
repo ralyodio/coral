@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashSet};
 
-use coral_engine::{QuerySource, RuntimeSourceComponent, UdfRuntimeDefinition};
+use coral_engine::{QuerySource, RuntimeCatalog, StaticRuntimeCatalog, UdfRuntimeDefinition};
 
 use crate::bootstrap::AppError;
 
@@ -33,10 +33,8 @@ pub(crate) fn source_sql_publish_targets_for_schemas(
 ) -> SqlPublishTargets {
     let mut targets = HashSet::new();
     for source in selected_sources {
-        for component in source.components() {
-            if schemas.contains(component.source_name()) {
-                record_source_component_sql_targets(component, &mut targets);
-            }
+        if let Some(catalog) = source.catalog() {
+            record_source_catalog_sql_targets(catalog, Some(schemas), &mut targets);
         }
     }
     targets
@@ -57,46 +55,43 @@ pub(crate) fn unchecked_source_publish_schemas(
 fn source_sql_publish_targets(selected_sources: &[QuerySource]) -> SqlPublishTargets {
     let mut targets = HashSet::new();
     for source in selected_sources {
-        for component in source.components() {
-            record_source_component_sql_targets(component, &mut targets);
+        if let Some(catalog) = source.catalog() {
+            record_source_catalog_sql_targets(catalog, None, &mut targets);
         }
     }
     targets
 }
 
-fn record_source_component_sql_targets(
-    component: &RuntimeSourceComponent,
+fn record_source_catalog_sql_targets(
+    catalog: &RuntimeCatalog,
+    schemas: Option<&BTreeSet<String>>,
     targets: &mut SqlPublishTargets,
 ) {
-    match component {
-        RuntimeSourceComponent::Database(_) => {
+    let mut record = |schema: &str, name: &str| {
+        if schemas.is_none_or(|schemas| schemas.contains(schema)) {
+            targets.insert(SqlPublishTarget::new(schema, name));
+        }
+    };
+    match catalog {
+        RuntimeCatalog::Discovered(_) => {
             // Database tables are discovered at registration and have no static publish targets.
         }
-        RuntimeSourceComponent::Http(manifest) => {
-            for table in &manifest.tables {
-                targets.insert(SqlPublishTarget::new(&manifest.common.name, table.name()));
-            }
-            for function in &manifest.functions {
-                targets.insert(SqlPublishTarget::new(&manifest.common.name, &function.name));
+        RuntimeCatalog::Static(StaticRuntimeCatalog::Http(catalog)) => {
+            for relation in catalog.relations() {
+                let sql_name = relation.sql_name();
+                record(sql_name.schema_name(), sql_name.name());
             }
         }
-        RuntimeSourceComponent::File(manifest) => {
-            for table in &manifest.tables {
-                targets.insert(SqlPublishTarget::new(&manifest.common.name, table.name()));
+        RuntimeCatalog::Static(StaticRuntimeCatalog::File(catalog)) => {
+            for relation in catalog.relations() {
+                let sql_name = relation.sql_name();
+                record(sql_name.schema_name(), sql_name.name());
             }
         }
-        RuntimeSourceComponent::Mcp(manifest) => {
-            for table in &manifest.tables {
-                targets.insert(SqlPublishTarget::new(
-                    &manifest.common.name,
-                    &table.common.name,
-                ));
-            }
-            for function in &manifest.functions {
-                targets.insert(SqlPublishTarget::new(
-                    &manifest.common.name,
-                    &function.common.name,
-                ));
+        RuntimeCatalog::Static(StaticRuntimeCatalog::Mcp(catalog)) => {
+            for relation in catalog.relations() {
+                let sql_name = relation.sql_name();
+                record(sql_name.schema_name(), sql_name.name());
             }
         }
     }
@@ -126,8 +121,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use coral_engine::{
-        RuntimeSourcePackage, UdfRuntimeImplementation, UdfRuntimePublish,
-        UdfRuntimeTableFunctionPublish,
+        UdfRuntimeImplementation, UdfRuntimePublish, UdfRuntimeTableFunctionPublish,
     };
     use coral_spec::parse_source_manifest_yaml;
 
@@ -159,30 +153,6 @@ tables:
         ))
         .expect("source manifest");
         QuerySource::new(manifest, BTreeMap::new(), BTreeMap::new())
-    }
-
-    fn multi_schema_source() -> QuerySource {
-        let primary = http_source("logical", "primary_table");
-        let secondary = http_source("secondary", "review_queue");
-        QuerySource::from_runtime_components(
-            RuntimeSourcePackage {
-                source_name: "logical".to_string(),
-                authored_version: None,
-                description: String::new(),
-                declared_inputs: Vec::new(),
-                test_queries: Vec::new(),
-                identity_requirements: None,
-                components: primary
-                    .components()
-                    .iter()
-                    .chain(secondary.components())
-                    .cloned()
-                    .collect(),
-            },
-            BTreeMap::new(),
-            BTreeMap::new(),
-        )
-        .expect("multi-schema source")
     }
 
     fn runtime_function() -> UdfRuntimeDefinition {
@@ -219,16 +189,5 @@ tables:
             unchecked_source_publish_schemas(&runtime_function(), &BTreeSet::new()),
             BTreeSet::from(["functions".to_string()])
         );
-    }
-
-    #[test]
-    fn schema_filter_checks_secondary_source_components() {
-        let targets = source_sql_publish_targets_for_schemas(
-            &[multi_schema_source()],
-            &BTreeSet::from(["secondary".to_string()]),
-        );
-
-        assert!(targets.contains(&SqlPublishTarget::new("secondary", "review_queue")));
-        assert!(!targets.contains(&SqlPublishTarget::new("logical", "primary_table")));
     }
 }

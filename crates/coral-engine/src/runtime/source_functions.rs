@@ -35,44 +35,49 @@ use datafusion::prelude::SessionContext;
 use crate::backends::shared::filter_expr::literal_to_string;
 use crate::backends::shared::scalar::timestamp_to_rfc3339;
 use crate::backends::{
-    BoundSourceFunctionArg, BoundSourceFunctionValue, RegisteredTableFunction,
+    BoundSourceFunctionArg, BoundSourceFunctionValue, RegisteredSource, RegisteredTableFunction,
     RegisteredTableFunctionArgument, SourceFunctionProviderFactory,
 };
 use crate::runtime::literal_scalar_value;
 use crate::runtime::scoped_table_functions::{
-    ScopedTableFunctionCall, ScopedTableFunctionName, ScopedTableFunctionSignature,
-    available_functions_hint, call_parts, find_placeholder, lower_named_args_to_positional_exprs,
-    original_relation, qualified_name, reject_settings,
-    reject_unbound_parameters as reject_unbound_table_function_parameters,
+    ScopedTableFunctionCall, ScopedTableFunctionSignature, available_functions_hint, call_parts,
+    find_placeholder, lower_named_args_to_positional_exprs, original_relation, qualified_name,
+    reject_settings, reject_unbound_parameters as reject_unbound_table_function_parameters,
     reject_unsupported_modifiers,
 };
-use coral_spec::ManifestDataType;
+use coral_spec::{ManifestDataType, SqlObjectName};
 
 pub(crate) const SOURCE_FUNCTION_NODE_NAME: &str = "CoralSourceFunction";
 const SOURCE_FUNCTION_ANALYZER_RULE_NAME: &str = "coral_source_functions";
 
 #[derive(Debug)]
 pub(crate) struct SourceFunctionRegistry {
-    functions: HashMap<ScopedTableFunctionName, SourceFunction>,
-    source_schemas: HashSet<String>,
+    functions: HashMap<SqlObjectName, SourceFunction>,
+    source_qualifiers: HashSet<(String, String)>,
 }
 
 impl SourceFunctionRegistry {
-    pub(crate) fn new<'a>(
-        functions: impl IntoIterator<Item = &'a RegisteredTableFunction>,
-    ) -> Self {
-        let mut source_schemas = HashSet::new();
+    pub(crate) fn new(sources: &[RegisteredSource]) -> Self {
+        let mut source_qualifiers = HashSet::new();
         let mut functions_by_name = HashMap::new();
 
-        for function in functions {
-            let lookup_key = ScopedTableFunctionName::from_manifest(function);
-            source_schemas.insert(lookup_key.schema.clone());
-            functions_by_name.insert(lookup_key, SourceFunction::from_registered(function));
+        for source in sources {
+            for function in &source.table_functions {
+                let lookup_key = function.sql_name.clone();
+                source_qualifiers.insert((
+                    lookup_key.catalog_name().to_string(),
+                    lookup_key.schema_name().to_string(),
+                ));
+                functions_by_name.insert(
+                    lookup_key.clone(),
+                    SourceFunction::from_registered(function, &lookup_key),
+                );
+            }
         }
 
         Self {
             functions: functions_by_name,
-            source_schemas,
+            source_qualifiers,
         }
     }
 
@@ -80,7 +85,7 @@ impl SourceFunctionRegistry {
         self.functions.is_empty()
     }
 
-    pub(crate) fn names(&self) -> HashSet<ScopedTableFunctionName> {
+    pub(crate) fn names(&self) -> HashSet<SqlObjectName> {
         self.functions.keys().cloned().collect()
     }
 
@@ -124,17 +129,39 @@ impl SourceFunctionRegistry {
         self.functions.get(&call.lookup_key)
     }
 
-    fn owns_schema(&self, call: &ScopedTableFunctionCall) -> bool {
-        self.source_schemas.contains(&call.lookup_key.schema)
+    fn owns_qualifier(&self, call: &ScopedTableFunctionCall) -> bool {
+        self.source_qualifiers.contains(&(
+            call.lookup_key.catalog_name().to_string(),
+            call.lookup_key.schema_name().to_string(),
+        ))
     }
 
-    fn available_functions_hint(&self, schema: &str) -> String {
+    fn available_functions_hint(&self, catalog: &str, schema: &str) -> String {
         available_functions_hint(
+            catalog,
             schema,
             self.functions
                 .iter()
                 .map(|(key, function)| (key, function.display_name.as_str())),
         )
+    }
+
+    fn legacy_catalog_hint(&self, call: &ScopedTableFunctionCall) -> String {
+        if call.lookup_key.catalog_name() != crate::runtime::DATAFUSION_DEFAULT_CATALOG {
+            return String::new();
+        }
+        let mut matches = self.functions.keys().filter(|key| {
+            key.catalog_name() != crate::runtime::DATAFUSION_DEFAULT_CATALOG
+                && key.schema_name() == call.lookup_key.schema_name()
+                && key.name() == call.lookup_key.name()
+        });
+        let Some(first) = matches.next() else {
+            return String::new();
+        };
+        if matches.next().is_some() {
+            return String::new();
+        }
+        format!("; use the canonical function name {first}")
     }
 }
 
@@ -149,8 +176,15 @@ impl RelationPlanner for SourceFunctionRegistry {
         };
 
         let Some(function) = self.find(&call) else {
-            if self.owns_schema(&call) {
-                let hint = self.available_functions_hint(&call.lookup_key.schema);
+            let legacy_hint = self.legacy_catalog_hint(&call);
+            if !legacy_hint.is_empty() {
+                return Err(call.unknown_function_error("source table function", &legacy_hint));
+            }
+            if self.owns_qualifier(&call) {
+                let hint = self.available_functions_hint(
+                    call.lookup_key.catalog_name(),
+                    call.lookup_key.schema_name(),
+                );
                 return Err(call.unknown_function_error("source table function", &hint));
             }
             return Ok(original_relation(relation));
@@ -189,18 +223,32 @@ struct SourceFunction {
 }
 
 impl SourceFunction {
-    fn from_registered(function: &RegisteredTableFunction) -> Self {
+    fn from_registered(function: &RegisteredTableFunction, sql_name: &SqlObjectName) -> Self {
         let arguments = function
             .arguments
             .iter()
             .map(SourceFunctionArgument::from_registered)
             .collect::<Vec<_>>();
         Self {
-            display_name: qualified_name(&function.schema_name, &function.function_name),
-            table_reference: TableReference::partial(
-                function.schema_name.clone(),
-                function.function_name.clone(),
-            ),
+            display_name: if sql_name.catalog_name() == crate::runtime::DATAFUSION_DEFAULT_CATALOG {
+                qualified_name(sql_name.schema_name(), sql_name.name())
+            } else {
+                sql_name.to_string()
+            },
+            table_reference: if sql_name.catalog_name()
+                == crate::runtime::DATAFUSION_DEFAULT_CATALOG
+            {
+                TableReference::partial(
+                    sql_name.schema_name().to_string(),
+                    sql_name.name().to_string(),
+                )
+            } else {
+                TableReference::full(
+                    sql_name.catalog_name().to_string(),
+                    sql_name.schema_name().to_string(),
+                    sql_name.name().to_string(),
+                )
+            },
             arguments,
             factory: Arc::clone(&function.factory),
         }

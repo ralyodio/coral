@@ -1,6 +1,6 @@
 //! Source-surface routing and opaque scope derivation for observed values.
 
-use coral_engine::{QuerySource, RuntimeSourceComponent};
+use coral_engine::{QuerySource, RuntimeCatalog, StaticRuntimeCatalog};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -95,72 +95,41 @@ pub(super) fn source_surface_scopes(
 ) -> Result<Vec<ObservedSourceSurfaceScope>, ObservedSourceIdentityMismatch> {
     let source_name = source.source_name();
     let mut scopes = Vec::new();
-    for component in source.components() {
-        let component_source_name = match component {
-            // Database components declare no HTTP/MCP observation surfaces, so
-            // they never contribute a stored identity for the tripwire to
-            // protect; the arm below enumerates nothing for them.
-            RuntimeSourceComponent::Database(_) => source_name,
-            RuntimeSourceComponent::Http(manifest) => manifest.common.name.as_str(),
-            RuntimeSourceComponent::File(manifest) => manifest.common.name.as_str(),
-            RuntimeSourceComponent::Mcp(manifest) => manifest.common.name.as_str(),
-        };
-        if component_source_name != source_name {
+    let mut push_relation = |sql_name: &coral_spec::SqlObjectName, is_table_function: bool| {
+        if sql_name.schema_name() != source_name {
             return Err(ObservedSourceIdentityMismatch {
                 source_name: source_name.to_string(),
-                component_source_name: component_source_name.to_string(),
+                component_source_name: sql_name.schema_name().to_string(),
             });
         }
+        scopes.push(surface_scope(
+            source_name,
+            if is_table_function {
+                ObservedValuesSurfaceKind::Function
+            } else {
+                ObservedValuesSurfaceKind::Table
+            },
+            sql_name.name(),
+            seed,
+        ));
+        Ok(())
+    };
 
-        match component {
-            RuntimeSourceComponent::Database(_) => {
-                // Database tables do not declare HTTP/MCP observation surfaces.
+    match source.catalog() {
+        None | Some(RuntimeCatalog::Discovered(_)) => {}
+        Some(RuntimeCatalog::Static(StaticRuntimeCatalog::Http(catalog))) => {
+            for relation in catalog.relations() {
+                push_relation(relation.sql_name(), relation.is_table_function())?;
             }
-            RuntimeSourceComponent::Http(manifest) => {
-                scopes.extend(manifest.tables.iter().map(|table| {
-                    surface_scope(
-                        source_name,
-                        ObservedValuesSurfaceKind::Table,
-                        table.name(),
-                        seed,
-                    )
-                }));
-                scopes.extend(manifest.functions.iter().map(|function| {
-                    surface_scope(
-                        source_name,
-                        ObservedValuesSurfaceKind::Function,
-                        function.name.as_str(),
-                        seed,
-                    )
-                }));
+        }
+        Some(RuntimeCatalog::Static(StaticRuntimeCatalog::File(catalog))) => {
+            for relation in catalog.relations() {
+                push_relation(relation.sql_name(), false)?;
             }
-            RuntimeSourceComponent::File(manifest) => {
-                scopes.extend(manifest.tables.iter().map(|table| {
-                    surface_scope(
-                        source_name,
-                        ObservedValuesSurfaceKind::Table,
-                        table.name(),
-                        seed,
-                    )
-                }));
-            }
-            RuntimeSourceComponent::Mcp(manifest) => {
-                scopes.extend(manifest.tables.iter().map(|table| {
-                    surface_scope(
-                        source_name,
-                        ObservedValuesSurfaceKind::Table,
-                        table.name(),
-                        seed,
-                    )
-                }));
-                scopes.extend(manifest.functions.iter().map(|function| {
-                    surface_scope(
-                        source_name,
-                        ObservedValuesSurfaceKind::Function,
-                        function.name(),
-                        seed,
-                    )
-                }));
+        }
+        Some(RuntimeCatalog::Static(StaticRuntimeCatalog::Mcp(catalog))) => {
+            for relation in catalog.relations() {
+                push_relation(relation.sql_name(), relation.is_table_function())?;
             }
         }
     }

@@ -326,9 +326,12 @@ fn compile_sources(
 
 fn compile_sources_with_mcp_manifest(
     source_manifest: coral_spec::ValidatedSourceManifest,
-    mcp_manifest: coral_spec::backends::mcp::McpSourceManifest,
+    mcp_manifest: &coral_spec::backends::mcp::McpSourceManifest,
     caller: Arc<dyn McpToolCaller>,
 ) -> Vec<CompiledQuerySource> {
+    let catalog = crate::McpRuntimeCatalog::try_from_default_catalog_manifest(mcp_manifest.clone())
+        .expect("validated MCP manifest produces a valid runtime catalog");
+    let source_name = mcp_manifest.common.name.clone();
     let source = QuerySource::new(source_manifest, BTreeMap::new(), BTreeMap::new());
     let source_input_resolution = SourceInputResolutionContext::from_query_source(&source);
     let resolved_inputs = Arc::new(coral_spec::resolve_inputs(
@@ -338,9 +341,12 @@ fn compile_sources_with_mcp_manifest(
     ));
     let source_inputs = Arc::new(McpSourceInputs::static_inputs(resolved_inputs));
     let compiled = compile_source_with_caller(
-        mcp_manifest,
-        source_input_resolution,
-        source_inputs,
+        McpCompiledSourceConfig {
+            source_name,
+            catalog,
+            source_input_resolution,
+            source_inputs,
+        },
         caller,
         source_observation_publishers(&[]),
     );
@@ -384,6 +390,9 @@ fn compile_sources_with_inputs_and_observation_publishers(
     publishers: &[Arc<dyn SourceObservationPublisher>],
 ) -> Vec<CompiledQuerySource> {
     let mcp_manifest = manifest.as_mcp().expect("mcp manifest").clone();
+    let catalog = crate::McpRuntimeCatalog::try_from_default_catalog_manifest(mcp_manifest.clone())
+        .expect("validated MCP manifest produces a valid runtime catalog");
+    let source_name = mcp_manifest.common.name.clone();
     let variables = BTreeMap::new();
     let source = QuerySource::new(manifest, variables.clone(), secrets);
     let source_input_resolution = SourceInputResolutionContext::from_query_source(&source);
@@ -401,9 +410,12 @@ fn compile_sources_with_inputs_and_observation_publishers(
         None => Arc::new(McpSourceInputs::static_inputs(resolved_inputs)),
     };
     let compiled = compile_source_with_caller(
-        mcp_manifest,
-        source_input_resolution,
-        source_inputs,
+        McpCompiledSourceConfig {
+            source_name,
+            catalog,
+            source_input_resolution,
+            source_inputs,
+        },
         caller,
         source_observation_publishers(publishers),
     );
@@ -561,12 +573,7 @@ async fn missing_required_function_arg_fails_planning() {
 
 fn register_test_sources(ctx: &SessionContext, sources: Vec<CompiledQuerySource>) {
     let registration = register_sources_blocking(ctx, sources).expect("mcp source should register");
-    let source_functions = SourceFunctionRegistry::new(
-        registration
-            .active_sources
-            .iter()
-            .flat_map(|source| source.table_functions.iter()),
-    );
+    let source_functions = SourceFunctionRegistry::new(&registration.active_sources);
     source_functions
         .install(ctx)
         .expect("source function planner should register");
@@ -582,12 +589,7 @@ fn register_test_sources_with_catalog(ctx: &SessionContext, sources: Vec<Compile
         catalog::CatalogColumnFetchFailures::default(),
     )
     .expect("catalog should register");
-    let source_functions = SourceFunctionRegistry::new(
-        registration
-            .active_sources
-            .iter()
-            .flat_map(|source| source.table_functions.iter()),
-    );
+    let source_functions = SourceFunctionRegistry::new(&registration.active_sources);
     source_functions
         .install(ctx)
         .expect("source function planner should register");
@@ -940,7 +942,8 @@ async fn source_scan_observation_sees_full_mcp_batch_before_projection() {
     let issue_scan = observations
         .iter()
         .find(|observation| {
-            observation.source_name == "test_mcp" && observation.surface_name == "issues"
+            observation.sql_name
+                == coral_spec::SqlObjectName::new("datafusion", "test_mcp", "issues")
         })
         .expect("issues scan should be observed");
 
@@ -1494,7 +1497,7 @@ async fn generated_offset_pagination_pushes_limit_and_offset_pages() {
     let (source_manifest, mcp_manifest) = mcp_table_with_generated_offset_pagination_manifest();
     register_test_sources(
         &ctx,
-        compile_sources_with_mcp_manifest(source_manifest, mcp_manifest, caller.clone()),
+        compile_sources_with_mcp_manifest(source_manifest, &mcp_manifest, caller.clone()),
     );
 
     let batches = ctx

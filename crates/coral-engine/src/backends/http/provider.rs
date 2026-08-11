@@ -25,12 +25,13 @@ use crate::backends::shared::filter_expr::{
 use crate::backends::shared::json_exec::{JsonExec, RowFetcher};
 use crate::backends::shared::mapping::{convert_items, filter_items_by_column_values};
 use crate::backends::shared::source_observation::SourceObservationPublishers;
+use coral_spec::SqlObjectName;
 use coral_spec::backends::http::HttpTableSpec;
 
 /// Table provider that exposes one manifest-defined HTTP table to `DataFusion`.
 pub(crate) struct HttpSourceTableProvider {
     backend: HttpSourceClient,
-    source_schema: String,
+    sql_name: SqlObjectName,
     table: Arc<HttpTableSpec>,
     target: HttpFetchTarget,
     schema: SchemaRef,
@@ -40,8 +41,7 @@ pub(crate) struct HttpSourceTableProvider {
 impl std::fmt::Debug for HttpSourceTableProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpSourceTableProvider")
-            .field("source_schema", &self.source_schema)
-            .field("table", &self.table.name())
+            .field("sql_name", &self.sql_name)
             .finish_non_exhaustive()
     }
 }
@@ -55,15 +55,15 @@ impl HttpSourceTableProvider {
     /// is invalid.
     pub(crate) fn new(
         backend: HttpSourceClient,
-        source_schema: String,
+        sql_name: SqlObjectName,
         table: HttpTableSpec,
         source_observation_publishers: SourceObservationPublishers,
     ) -> Result<Self> {
-        let schema = schema_from_columns(table.columns(), &source_schema, table.name())?;
+        let schema = schema_from_columns(table.columns(), sql_name.schema_name(), sql_name.name())?;
         let target = HttpFetchTarget::from_resolved_table_request(&table, table.request.clone());
         Ok(Self {
             backend,
-            source_schema,
+            sql_name,
             table: Arc::new(table),
             target,
             schema,
@@ -72,7 +72,7 @@ impl HttpSourceTableProvider {
     }
 
     pub(crate) fn source_schema(&self) -> &str {
-        &self.source_schema
+        self.sql_name.schema_name()
     }
 
     pub(crate) fn client(&self) -> &HttpSourceClient {
@@ -100,7 +100,7 @@ struct HttpFetchPlan {
 
 pub(crate) struct HttpJsonExecRequest<'a> {
     pub(crate) backend: HttpSourceClient,
-    pub(crate) source_schema: &'a str,
+    pub(crate) sql_name: &'a SqlObjectName,
     pub(crate) target: HttpFetchTarget,
     pub(crate) schema: SchemaRef,
     pub(crate) request_filter_values: HashMap<String, String>,
@@ -156,7 +156,7 @@ fn merge_filter_values(
 pub(crate) fn http_json_exec(request: HttpJsonExecRequest<'_>) -> Result<Arc<dyn ExecutionPlan>> {
     let HttpJsonExecRequest {
         backend,
-        source_schema,
+        sql_name,
         target,
         schema,
         request_filter_values,
@@ -238,14 +238,15 @@ pub(crate) fn http_json_exec(request: HttpJsonExecRequest<'_>) -> Result<Arc<dyn
     };
 
     let exec = JsonExec::new(
-        source_schema,
-        target.name(),
+        sql_name.schema_name(),
+        sql_name.name(),
         schema,
         fetcher,
         converter,
         projection.cloned(),
     )?
     .with_source_observation_converter(
+        sql_name.clone(),
         surface_kind,
         source_observation_publishers,
         observation_converter,
@@ -303,8 +304,8 @@ impl TableProvider for HttpSourceTableProvider {
             if !filter_values.contains_key(&required.name) {
                 return Err(DataFusionError::External(Box::new(
                     ProviderQueryError::MissingRequiredFilter {
-                        schema: self.source_schema.clone(),
-                        table: self.table.name().to_string(),
+                        schema: self.sql_name.schema_name().to_string(),
+                        table: self.sql_name.name().to_string(),
                         column: required.name.clone(),
                     },
                 )));
@@ -339,7 +340,7 @@ impl TableProvider for HttpSourceTableProvider {
 
         http_json_exec(HttpJsonExecRequest {
             backend: self.backend.clone(),
-            source_schema: &self.source_schema,
+            sql_name: &self.sql_name,
             target,
             schema: self.schema.clone(),
             request_filter_values,

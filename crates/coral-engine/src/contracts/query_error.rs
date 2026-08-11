@@ -444,6 +444,17 @@ fn table_not_found_hint(
         ));
     };
 
+    if let Some(info) = unique_catalog_table_for_legacy_name(schema, table, known_tables) {
+        return Some(format!(
+            "Use the canonical table name `{}`.",
+            format_schema_relation(
+                info.catalog_name.as_deref(),
+                &info.schema_name,
+                &info.table_name,
+            )
+        ));
+    }
+
     let tables_in_schema: Vec<&TableInfo> = known_tables
         .iter()
         .filter(|info| table_schema_matches(info, schema))
@@ -493,6 +504,20 @@ fn table_not_found_hint(
         &best.schema_name,
         &best.table_name,
     )))
+}
+
+fn unique_catalog_table_for_legacy_name<'a>(
+    schema: &str,
+    table: &str,
+    known_tables: &'a [TableInfo],
+) -> Option<&'a TableInfo> {
+    let mut matches = known_tables.iter().filter(|info| {
+        info.catalog_name.is_some()
+            && eq_folded(schema, &[&info.schema_name])
+            && eq_folded(table, &[&info.table_name])
+    });
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
 }
 
 fn quoted_qualified_table_match<'a>(

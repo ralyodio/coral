@@ -4,6 +4,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use coral_spec::SqlObjectName;
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::error::{DataFusionError, Result};
@@ -37,8 +38,6 @@ pub(crate) type Fetcher = Arc<dyn RowFetcher>;
 pub(crate) type Converter = Arc<dyn Fn(&[Value]) -> Result<RecordBatch> + Send + Sync>;
 
 fn observe_source_scan_batch(
-    source_name: String,
-    surface_name: String,
     observation: SourceObservationConfig,
     observation_converter: Converter,
     output_converter: Converter,
@@ -47,17 +46,11 @@ fn observe_source_scan_batch(
         let output_batch = output_converter(items)?;
         match observation_converter(items) {
             Ok(observation_batch) => {
-                publish_source_scan_batch(
-                    &source_name,
-                    &surface_name,
-                    &observation,
-                    &observation_batch,
-                );
+                publish_source_scan_batch(&observation, &observation_batch);
             }
             Err(error) => {
                 tracing::debug!(
-                    source = source_name,
-                    surface = surface_name,
+                    sql_name = %observation.sql_name,
                     error = %error,
                     "failed to convert source-scan observation batch; dropping observation"
                 );
@@ -68,14 +61,12 @@ fn observe_source_scan_batch(
 }
 
 fn observe_output_batch(
-    source_name: String,
-    surface_name: String,
     observation: SourceObservationConfig,
     output_converter: Converter,
 ) -> Converter {
     Arc::new(move |items| {
         let output_batch = output_converter(items)?;
-        publish_source_scan_batch(&source_name, &surface_name, &observation, &output_batch);
+        publish_source_scan_batch(&observation, &output_batch);
         Ok(output_batch)
     })
 }
@@ -147,18 +138,15 @@ impl JsonExec {
     #[must_use]
     pub(crate) fn with_source_observation(
         mut self,
+        sql_name: SqlObjectName,
         surface_kind: SourceObservationSurfaceKind,
         publishers: SourceObservationPublishers,
     ) -> Self {
-        let Some(observation) = SourceObservationConfig::new(surface_kind, publishers) else {
+        let Some(observation) = SourceObservationConfig::new(sql_name, surface_kind, publishers)
+        else {
             return self;
         };
-        self.converter = observe_output_batch(
-            self.source_name.clone(),
-            self.table_name.clone(),
-            observation,
-            self.converter.clone(),
-        );
+        self.converter = observe_output_batch(observation, self.converter.clone());
         self
     }
 
@@ -170,20 +158,17 @@ impl JsonExec {
     #[must_use]
     pub(crate) fn with_source_observation_converter(
         mut self,
+        sql_name: SqlObjectName,
         surface_kind: SourceObservationSurfaceKind,
         publishers: SourceObservationPublishers,
         observation_converter: Converter,
     ) -> Self {
-        let Some(observation) = SourceObservationConfig::new(surface_kind, publishers) else {
+        let Some(observation) = SourceObservationConfig::new(sql_name, surface_kind, publishers)
+        else {
             return self;
         };
-        self.converter = observe_source_scan_batch(
-            self.source_name.clone(),
-            self.table_name.clone(),
-            observation,
-            observation_converter,
-            self.converter.clone(),
-        );
+        self.converter =
+            observe_source_scan_batch(observation, observation_converter, self.converter.clone());
         self
     }
 }
@@ -429,6 +414,7 @@ mod tests {
         )
         .expect("exec should build")
         .with_source_observation(
+            coral_spec::SqlObjectName::new("datafusion", "demo", "numbers"),
             SourceObservationSurfaceKind::Table,
             source_observation_publishers(&[
                 publisher.clone() as Arc<dyn SourceObservationPublisher>
@@ -485,6 +471,7 @@ mod tests {
         )
         .expect("exec should build")
         .with_source_observation(
+            coral_spec::SqlObjectName::new("datafusion", "demo", "numbers"),
             SourceObservationSurfaceKind::Table,
             source_observation_publishers(&[
                 publisher.clone() as Arc<dyn SourceObservationPublisher>
@@ -534,6 +521,7 @@ mod tests {
         )
         .expect("exec should build")
         .with_source_observation_converter(
+            coral_spec::SqlObjectName::new("datafusion", "demo", "numbers"),
             SourceObservationSurfaceKind::Table,
             source_observation_publishers(&[
                 publisher.clone() as Arc<dyn SourceObservationPublisher>
@@ -575,6 +563,7 @@ mod tests {
         )
         .expect("exec should build")
         .with_source_observation_converter(
+            coral_spec::SqlObjectName::new("datafusion", "demo", "numbers"),
             SourceObservationSurfaceKind::Table,
             source_observation_publishers(&[
                 publisher.clone() as Arc<dyn SourceObservationPublisher>

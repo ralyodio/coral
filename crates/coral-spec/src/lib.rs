@@ -88,6 +88,7 @@ mod inputs;
 mod loader;
 mod parser;
 mod schema;
+mod sql_name;
 mod template;
 mod udf;
 pub mod v4;
@@ -134,14 +135,16 @@ pub use loader::load_manifest_path;
 pub use parser::{
     ValidatedSourceManifest, parse_source_manifest_value, parse_source_manifest_yaml,
 };
+pub use sql_name::SqlObjectName;
 pub use template::{ParsedTemplate, TemplateNamespace, TemplatePart, TemplateToken};
 pub use udf::{
     FunctionCoralSqlImplementationSpec, FunctionImplementationSpec, FunctionSpec,
     parse_function_sql,
 };
+pub use validate::validate_identifier;
 pub(crate) use validate::{
     DeclaredRelation, DetailHintDeclaringSurface, DetailHintTargetTable, HttpTableValidation,
     validate_columns, validate_declared_relation_namespace, validate_detail_hint_references,
     validate_filters_and_column_exprs, validate_http_function, validate_http_table,
-    validate_identifier, validate_required_guide, validate_unique_values,
+    validate_required_guide, validate_unique_values,
 };

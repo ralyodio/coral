@@ -80,18 +80,21 @@ pub use composition::{
     SourceObservationPublisher, SourceObservationSurfaceKind, SourceScanObservation, SourceTables,
 };
 pub use contracts::{
-    CatalogInfo, ColumnInfo, CoreError, DependentJoinConfig, DependentJoinSourceConfig,
-    DescribeCatalogSurfaceInfo, EffectiveDependentJoinConfig, MemorySize, QueryExecution,
-    QueryExecutionProvenance, QueryMemoryConfig, QueryParameterValue, QueryParameters, QueryPlan,
-    QueryRuntimeConfig, QueryRuntimeContext, QuerySource, QueryTableFunctionUsage, QueryTableUsage,
-    QueryTestFailure, QueryTestResult, QueryTestSuccess, ResolvedQueryResources,
-    RuntimeSourceComponent, RuntimeSourcePackage, SourceValidationReport, StatusCode,
+    CatalogInfo, ColumnInfo, CoreError, DatabaseRuntimeBackend, DatabaseRuntimeCatalog,
+    DependentJoinConfig, DependentJoinSourceConfig, DescribeCatalogSurfaceInfo,
+    EffectiveDependentJoinConfig, FileRuntimeCatalog, FileRuntimeRelation, HttpRuntimeBackend,
+    HttpRuntimeCatalog, HttpRuntimeRelation, McpRuntimeBackend, McpRuntimeCatalog,
+    McpRuntimeRelation, MemorySize, QueryExecution, QueryExecutionProvenance, QueryMemoryConfig,
+    QueryParameterValue, QueryParameters, QueryPlan, QueryRuntimeConfig, QueryRuntimeContext,
+    QuerySource, QueryTableFunctionUsage, QueryTableUsage, QueryTestFailure, QueryTestResult,
+    QueryTestSuccess, ResolvedQueryResources, RuntimeCatalog, RuntimeRelationKind,
+    RuntimeSourcePackage, SourceValidationReport, StaticRuntimeCatalog, StatusCode,
     StructuredQueryError, TableFunctionArgumentInfo, TableFunctionInfo,
     TableFunctionResultColumnInfo, TableInfo, UdfRuntimeArgument, UdfRuntimeDefinition,
     UdfRuntimeImplementation, UdfRuntimePublish, UdfRuntimeResultColumn, UdfRuntimeSignature,
     UdfRuntimeSqlDefinition, UdfRuntimeTableFunctionPublish,
 };
-pub use runtime::normalize_catalog_name;
+pub use runtime::{DATAFUSION_DEFAULT_CATALOG, normalize_catalog_name};
 
 /// High-level query operations for the local query engine.
 pub struct CoralQuery;

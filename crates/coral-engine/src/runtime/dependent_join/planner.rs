@@ -38,6 +38,7 @@ impl ExtensionPlanner for DependentJoinExtensionPlanner {
             resolver: Arc::clone(resolver),
             dependent: provider.client,
             dependent_source_schema: provider.source_schema,
+            dependent_sql_name: provider.sql_name,
             table: provider.table,
             binding_keys: Arc::from(node.binding_keys.clone()),
             literal_filters: Arc::new(node.literal_filters.clone()),
@@ -61,6 +62,7 @@ impl ExtensionPlanner for DependentJoinExtensionPlanner {
 struct ResolvedHttpDependent {
     client: crate::backends::http::HttpSourceClient,
     source_schema: String,
+    sql_name: coral_spec::SqlObjectName,
     table: Arc<coral_spec::backends::http::HttpTableSpec>,
     source_observation_publishers: SourceObservationPublishers,
 }
@@ -108,6 +110,11 @@ async fn resolve_http_provider(
     Ok(ResolvedHttpDependent {
         client: provider.client().clone(),
         source_schema: provider.source_schema().to_string(),
+        sql_name: coral_spec::SqlObjectName::new(
+            table_ref.catalog.to_string(),
+            table_ref.schema.to_string(),
+            table_ref.table.to_string(),
+        ),
         table: Arc::clone(provider.table_spec()),
         source_observation_publishers: Arc::clone(provider.source_observation_publishers()),
     })

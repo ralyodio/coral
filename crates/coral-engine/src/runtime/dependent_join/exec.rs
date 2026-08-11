@@ -35,6 +35,7 @@ pub(crate) struct DependentJoinExec {
     resolver: Arc<dyn ExecutionPlan>,
     dependent: HttpSourceClient,
     dependent_source_schema: String,
+    dependent_sql_name: coral_spec::SqlObjectName,
     table: Arc<HttpTableSpec>,
     binding_keys: Arc<[BindingKey]>,
     literal_filters: Arc<BTreeMap<String, String>>,
@@ -57,6 +58,7 @@ pub(crate) struct DependentJoinExecConfig {
     pub(crate) resolver: Arc<dyn ExecutionPlan>,
     pub(crate) dependent: HttpSourceClient,
     pub(crate) dependent_source_schema: String,
+    pub(crate) dependent_sql_name: coral_spec::SqlObjectName,
     pub(crate) table: Arc<HttpTableSpec>,
     pub(crate) binding_keys: Arc<[BindingKey]>,
     pub(crate) literal_filters: Arc<BTreeMap<String, String>>,
@@ -84,6 +86,7 @@ impl DependentJoinExec {
             resolver: config.resolver,
             dependent: config.dependent,
             dependent_source_schema: config.dependent_source_schema,
+            dependent_sql_name: config.dependent_sql_name,
             table: config.table,
             binding_keys: config.binding_keys,
             literal_filters: config.literal_filters,
@@ -110,6 +113,7 @@ impl DependentJoinExec {
             resolver,
             dependent: self.dependent.clone(),
             dependent_source_schema: self.dependent_source_schema.clone(),
+            dependent_sql_name: self.dependent_sql_name.clone(),
             table: Arc::clone(&self.table),
             binding_keys: Arc::clone(&self.binding_keys),
             literal_filters: Arc::clone(&self.literal_filters),
@@ -286,6 +290,7 @@ impl ExecutionPlan for DependentJoinExec {
             .partition_count();
         let dependent = self.dependent.clone();
         let dependent_source_schema = self.dependent_source_schema.clone();
+        let dependent_sql_name = self.dependent_sql_name.clone();
         let table = Arc::clone(&self.table);
         let binding_keys = Arc::clone(&self.binding_keys);
         let dependent_projection = Arc::clone(&self.dependent_projection);
@@ -328,6 +333,7 @@ impl ExecutionPlan for DependentJoinExec {
                 context,
                 dependent,
                 dependent_source_schema,
+                dependent_sql_name,
                 table,
                 binding_keys,
                 binding_filters,
@@ -374,6 +380,7 @@ async fn execute_dependent_join(
     context: Arc<TaskContext>,
     dependent: HttpSourceClient,
     dependent_source_schema: String,
+    dependent_sql_name: coral_spec::SqlObjectName,
     table: Arc<HttpTableSpec>,
     binding_keys: Arc<[BindingKey]>,
     binding_filters: Vec<String>,
@@ -416,6 +423,7 @@ async fn execute_dependent_join(
 
     let output_memory = state.memory().new_empty();
     let source_observation = SourceObservationConfig::new(
+        dependent_sql_name,
         SourceObservationSurfaceKind::Table,
         source_observation_publishers,
     );

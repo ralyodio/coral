@@ -10,13 +10,16 @@ use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
 
-use crate::RequestAuthenticator;
 use crate::backends::http::auth::validate_auth_inputs;
 use crate::backends::shared::template::{
     validate_input_dependencies, validate_value_source_inputs,
 };
-use coral_spec::backends::http::HttpSourceManifest;
-use coral_spec::{BodySpec, HeaderSpec, RequestRouteSpec, RequestSpec as ManifestRequestSpec};
+use crate::{HttpRuntimeBackend, RequestAuthenticator};
+use coral_spec::backends::http::HttpTableSpec;
+use coral_spec::{
+    BodySpec, HeaderSpec, RequestRouteSpec, RequestSpec as ManifestRequestSpec,
+    SourceTableFunctionSpec,
+};
 
 struct HttpRequestSite<'a> {
     label: String,
@@ -24,58 +27,68 @@ struct HttpRequestSite<'a> {
 }
 
 pub(super) fn validate_source_scoped_http_config(
-    manifest: &HttpSourceManifest,
+    source_name: &str,
+    backend: &HttpRuntimeBackend,
+    tables: &[&HttpTableSpec],
+    functions: &[&SourceTableFunctionSpec],
     request_authenticators: &HashMap<String, Arc<dyn RequestAuthenticator>>,
     resolved_inputs: &BTreeMap<String, String>,
 ) -> Result<()> {
-    check_base_url_inputs(manifest, resolved_inputs)?;
-    check_request_header_inputs(manifest, resolved_inputs)?;
-    check_request_site_inputs(manifest, resolved_inputs)?;
-    check_auth_inputs(manifest, request_authenticators, resolved_inputs)?;
+    check_base_url_inputs(source_name, backend, resolved_inputs)?;
+    check_request_header_inputs(source_name, backend, resolved_inputs)?;
+    check_request_site_inputs(source_name, tables, functions, resolved_inputs)?;
+    check_auth_inputs(
+        source_name,
+        backend,
+        request_authenticators,
+        resolved_inputs,
+    )?;
     Ok(())
 }
 
 /// `base_url` may reference `{{filter.*}}` / `{{state.*}}` that only resolve
 /// per-request. Check input-token deps only; runtime renders the rest.
 fn check_base_url_inputs(
-    manifest: &HttpSourceManifest,
+    source_name: &str,
+    backend: &HttpRuntimeBackend,
     resolved_inputs: &BTreeMap<String, String>,
 ) -> Result<()> {
-    validate_input_dependencies(&manifest.base_url, resolved_inputs)
-        .map_err(|error| registration_error(&manifest.common.name, "base_url", &error))
+    validate_input_dependencies(&backend.base_url, resolved_inputs)
+        .map_err(|error| registration_error(source_name, "base_url", &error))
 }
 
 /// Same tolerance for filter/state tokens as `base_url`.
 fn check_request_header_inputs(
-    manifest: &HttpSourceManifest,
+    source_name: &str,
+    backend: &HttpRuntimeBackend,
     resolved_inputs: &BTreeMap<String, String>,
 ) -> Result<()> {
     validate_header_inputs(
-        &manifest.common.name,
+        source_name,
         "request_headers",
-        &manifest.request_headers,
+        &backend.request_headers,
         resolved_inputs,
     )?;
     Ok(())
 }
 
 fn check_request_site_inputs(
-    manifest: &HttpSourceManifest,
+    source_name: &str,
+    tables: &[&HttpTableSpec],
+    functions: &[&SourceTableFunctionSpec],
     resolved_inputs: &BTreeMap<String, String>,
 ) -> Result<()> {
-    for site in http_request_sites(manifest) {
-        validate_request_template_inputs(
-            &manifest.common.name,
-            &site.label,
-            site.request,
-            resolved_inputs,
-        )?;
+    for site in http_request_sites(tables, functions) {
+        validate_request_template_inputs(source_name, &site.label, site.request, resolved_inputs)?;
     }
     Ok(())
 }
 
-fn http_request_sites(manifest: &HttpSourceManifest) -> Vec<HttpRequestSite<'_>> {
-    let table_sites = manifest.tables.iter().flat_map(|table| {
+fn http_request_sites<'a>(
+    tables: &'a [&'a HttpTableSpec],
+    functions: &'a [&'a SourceTableFunctionSpec],
+) -> Vec<HttpRequestSite<'a>> {
+    let table_sites = tables.iter().copied().flat_map(|table| {
         let default = std::iter::once(HttpRequestSite {
             label: format!("table '{}' request", table.name()),
             request: &table.request,
@@ -87,7 +100,7 @@ fn http_request_sites(manifest: &HttpSourceManifest) -> Vec<HttpRequestSite<'_>>
         default.chain(routes)
     });
 
-    let function_sites = manifest.functions.iter().map(|function| HttpRequestSite {
+    let function_sites = functions.iter().copied().map(|function| HttpRequestSite {
         label: format!("function '{}' request", function.name),
         request: &function.request,
     });
@@ -109,12 +122,13 @@ fn table_request_route_label(table_name: &str, route: &RequestRouteSpec) -> Stri
 /// Auth is source-scoped: all value-source input dependencies must resolve
 /// before any request is issued.
 fn check_auth_inputs(
-    manifest: &HttpSourceManifest,
+    source_name: &str,
+    backend: &HttpRuntimeBackend,
     request_authenticators: &HashMap<String, Arc<dyn RequestAuthenticator>>,
     resolved_inputs: &BTreeMap<String, String>,
 ) -> Result<()> {
-    validate_auth_inputs(&manifest.auth, request_authenticators, resolved_inputs)
-        .map_err(|error| registration_error(&manifest.common.name, "auth", &error))
+    validate_auth_inputs(&backend.auth, request_authenticators, resolved_inputs)
+        .map_err(|error| registration_error(source_name, "auth", &error))
 }
 
 fn registration_error(source: &str, field: &str, error: &DataFusionError) -> DataFusionError {

@@ -25,6 +25,7 @@ use crate::backends::http::target::HttpFetchTarget;
 use crate::backends::schema_from_columns;
 use crate::backends::shared::source_observation::SourceObservationPublishers;
 use crate::backends::{BoundSourceFunctionArg, SourceFunctionProviderFactory};
+use coral_spec::SqlObjectName;
 
 struct FunctionCallContext<'a> {
     source_schema: &'a str,
@@ -35,8 +36,7 @@ struct FunctionCallContext<'a> {
 /// table function.
 struct HttpSourceFunctionState {
     backend: HttpSourceClient,
-    source_schema: String,
-    function_name: String,
+    sql_name: SqlObjectName,
     target: Arc<HttpFetchTarget>,
     schema: SchemaRef,
     source_observation_publishers: SourceObservationPublishers,
@@ -52,8 +52,7 @@ pub(crate) struct HttpSourceTableFunction {
 impl fmt::Debug for HttpSourceTableFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HttpSourceTableFunction")
-            .field("source_schema", &self.state.source_schema)
-            .field("function", &self.state.function_name)
+            .field("sql_name", &self.state.sql_name)
             .finish_non_exhaustive()
     }
 }
@@ -61,19 +60,18 @@ impl fmt::Debug for HttpSourceTableFunction {
 impl HttpSourceTableFunction {
     pub(crate) fn new(
         backend: HttpSourceClient,
-        source_schema: String,
+        sql_name: SqlObjectName,
         function: SourceTableFunctionSpec,
         source_observation_publishers: SourceObservationPublishers,
     ) -> Result<Self> {
-        let schema = schema_from_columns(&function.columns, &source_schema, &function.name)?;
+        let schema =
+            schema_from_columns(&function.columns, sql_name.schema_name(), sql_name.name())?;
         let target = HttpFetchTarget::from_function(&function);
-        let function_name = function.name.clone();
         Ok(Self {
             spec: Arc::new(function),
             state: Arc::new(HttpSourceFunctionState {
                 backend,
-                source_schema,
-                function_name,
+                sql_name,
                 target: Arc::new(target),
                 schema,
                 source_observation_publishers,
@@ -88,7 +86,7 @@ impl SourceFunctionProviderFactory for HttpSourceTableFunction {
     }
 
     fn provider_for_args(&self, args: &[BoundSourceFunctionArg]) -> Result<Arc<dyn TableProvider>> {
-        let arg_values = bind_function_args(&self.state.source_schema, &self.spec, args)?;
+        let arg_values = bind_function_args(self.state.sql_name.schema_name(), &self.spec, args)?;
         Ok(Arc::new(HttpSourceFunctionCallTableProvider {
             state: Arc::clone(&self.state),
             arg_values,
@@ -106,8 +104,7 @@ struct HttpSourceFunctionCallTableProvider {
 impl fmt::Debug for HttpSourceFunctionCallTableProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HttpSourceFunctionCallTableProvider")
-            .field("source_schema", &self.state.source_schema)
-            .field("function", &self.state.function_name)
+            .field("sql_name", &self.state.sql_name)
             .field("arg_values", &self.arg_values.keys())
             .finish_non_exhaustive()
     }
@@ -144,7 +141,7 @@ impl TableProvider for HttpSourceFunctionCallTableProvider {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         http_json_exec(HttpJsonExecRequest {
             backend: self.state.backend.clone(),
-            source_schema: &self.state.source_schema,
+            sql_name: &self.state.sql_name,
             target: (*self.state.target).clone(),
             schema: self.state.schema.clone(),
             request_filter_values: HashMap::new(),

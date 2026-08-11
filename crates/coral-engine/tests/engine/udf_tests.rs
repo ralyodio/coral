@@ -6,13 +6,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use arrow::datatypes::{DataType, Schema};
 use arrow::record_batch::RecordBatch;
 use coral_engine::{
-    CoralQuery, CoreError, EngineExtensions, QueryExecutionProvenance, QueryParameterValue,
-    QueryParameters, QueryResultObserver, QueryResultObserverError, QueryRuntimeConfig,
-    QueryRuntimeContext, QuerySource, RuntimeSourcePackage, StatusCode, UdfRuntimeArgument,
-    UdfRuntimeDefinition, UdfRuntimeImplementation, UdfRuntimePublish, UdfRuntimeResultColumn,
-    UdfRuntimeSignature, UdfRuntimeSqlDefinition, UdfRuntimeTableFunctionPublish,
+    CoralQuery, CoreError, EngineExtensions, HttpRuntimeBackend, HttpRuntimeCatalog,
+    HttpRuntimeRelation, QueryExecutionProvenance, QueryParameterValue, QueryParameters,
+    QueryResultObserver, QueryResultObserverError, QueryRuntimeConfig, QueryRuntimeContext,
+    QuerySource, RuntimeSourcePackage, StatusCode, UdfRuntimeArgument, UdfRuntimeDefinition,
+    UdfRuntimeImplementation, UdfRuntimePublish, UdfRuntimeResultColumn, UdfRuntimeSignature,
+    UdfRuntimeSqlDefinition, UdfRuntimeTableFunctionPublish,
 };
-use coral_spec::ManifestDataType;
+use coral_spec::{ManifestDataType, SqlObjectName, parse_source_manifest_value};
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -159,6 +160,42 @@ async fn search_source_with_response(
 
 fn search_source(server: &MockServer, source_name: &str) -> coral_engine::QuerySource {
     build_source(search_function_manifest(source_name, &server.uri()))
+}
+
+fn v4_search_source(server: &MockServer, catalog_name: &str, schema_name: &str) -> QuerySource {
+    let mut manifest =
+        parse_source_manifest_value(search_function_manifest(catalog_name, &server.uri()))
+            .expect("HTTP manifest")
+            .as_http()
+            .expect("HTTP source")
+            .clone();
+    manifest.common.dsl_version = 4;
+    let function = manifest.functions.first().expect("search function").clone();
+    let relation = HttpRuntimeRelation::try_table_function(
+        SqlObjectName::new(catalog_name, schema_name, &function.name),
+        function,
+    )
+    .expect("runtime relation");
+    let catalog = HttpRuntimeCatalog::try_new(
+        catalog_name,
+        HttpRuntimeBackend::from_manifest(&manifest),
+        vec![relation],
+    )
+    .expect("runtime catalog");
+    QuerySource::from_runtime_catalog(
+        RuntimeSourcePackage {
+            source_name: catalog_name.to_string(),
+            authored_version: None,
+            description: String::new(),
+            declared_inputs: Vec::new(),
+            test_queries: Vec::new(),
+            identity_requirements: None,
+            catalog: Some(catalog.into()),
+        },
+        BTreeMap::new(),
+        BTreeMap::new(),
+    )
+    .expect("runtime source")
 }
 
 fn events_source(source_name: &str) -> (tempfile::TempDir, coral_engine::QuerySource) {
@@ -535,7 +572,7 @@ async fn infer_udf_signature_uses_column_comparison_for_argument_type() {
 #[tokio::test]
 async fn infer_udf_signature_maps_component_schema_to_canonical_source_name() {
     let (_temp, component_source) = events_source("github_rest");
-    let source = QuerySource::from_runtime_components(
+    let source = QuerySource::from_runtime_catalog(
         RuntimeSourcePackage {
             source_name: "github".to_string(),
             authored_version: None,
@@ -543,7 +580,7 @@ async fn infer_udf_signature_maps_component_schema_to_canonical_source_name() {
             declared_inputs: Vec::new(),
             test_queries: Vec::new(),
             identity_requirements: None,
-            components: component_source.components().to_vec(),
+            catalog: component_source.catalog().cloned(),
         },
         BTreeMap::new(),
         BTreeMap::new(),
@@ -1067,6 +1104,32 @@ async fn udf_table_function_cannot_replace_source_table_function() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn udf_table_function_can_share_schema_and_name_with_v4_source_function() {
+    let server = MockServer::start().await;
+    let source = v4_search_source(&server, "github_v4", "issues");
+    let mut udf = min_id_udf_with_body("github_v4", "select 1 as id");
+    udf.publish.table_function.schema = "issues".to_string();
+    udf.publish.table_function.name = "search_issues".to_string();
+
+    let catalog = CoralQuery::list_catalog(
+        &[source],
+        test_runtime().with_udfs(vec![udf]),
+        None,
+        Some("issues"),
+    )
+    .await
+    .expect("different catalogs must not collide");
+
+    let catalogs = catalog
+        .table_functions
+        .iter()
+        .map(|function| function.catalog_name.as_deref())
+        .collect::<Vec<_>>();
+    assert_eq!(catalogs, [None, Some("github_v4")]);
+}
+
 #[tokio::test]
 async fn published_udf_table_function_is_cataloged() {
     let server = MockServer::start().await;

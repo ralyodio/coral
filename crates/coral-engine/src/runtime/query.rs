@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, FieldRef};
-use coral_spec::ManifestDataType;
+use coral_spec::{ManifestDataType, SqlObjectName};
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::common::{ScalarValue, TableReference};
 use datafusion::dataframe::DataFrame;
@@ -35,7 +35,6 @@ use crate::runtime::query_planner::CoralQueryPlanner;
 use crate::runtime::registry::{
     CompiledQuerySource, SourceRegistrationCandidate, SourceRegistrationFailure, register_sources,
 };
-use crate::runtime::scoped_table_functions::ScopedTableFunctionName;
 use crate::runtime::source_functions::{
     SOURCE_FUNCTION_NODE_NAME, SourceFunctionNode, SourceFunctionRegistry,
 };
@@ -62,15 +61,12 @@ pub(crate) struct QueryRuntimeAdapter {
     memory: QueryMemoryConfig,
     active_sources: Vec<RegisteredSource>,
     column_fetchers: Vec<CatalogColumnFetcher>,
-    source_function_names: HashSet<ScopedTableFunctionName>,
+    source_function_names: HashSet<SqlObjectName>,
     udfs_installed: bool,
     tables: Vec<TableInfo>,
     table_functions: Vec<TableFunctionInfo>,
     failures: Vec<SourceRegistrationFailure>,
     column_fetch_failures: catalog::CatalogColumnFetchFailures,
-    /// Source name keyed by top-level SQL name (schema for two-part sources,
-    /// catalog for database sources).
-    name_to_source: HashMap<String, String>,
     query_result_observers: Vec<Arc<dyn QueryResultObserver>>,
 }
 
@@ -125,7 +121,7 @@ struct RegisteredRuntime {
     ctx: Arc<SessionContext>,
     active_sources: Vec<RegisteredSource>,
     column_fetchers: Vec<CatalogColumnFetcher>,
-    source_function_names: HashSet<ScopedTableFunctionName>,
+    source_function_names: HashSet<SqlObjectName>,
     tables: Vec<TableInfo>,
     table_functions: Vec<TableFunctionInfo>,
     failures: Vec<SourceRegistrationFailure>,
@@ -229,7 +225,6 @@ async fn build_runtime_inner(
         table_functions: primary.table_functions,
         failures: primary.failures,
         column_fetch_failures: primary.column_fetch_failures,
-        name_to_source: name_to_source_names(sources),
         query_result_observers: extensions.query_result_observers,
     })
 }
@@ -346,12 +341,7 @@ async fn build_registered_runtime(
         config.source_decorators,
     )
     .await?;
-    let source_functions = SourceFunctionRegistry::new(
-        registration
-            .active_sources
-            .iter()
-            .flat_map(|source| source.table_functions.iter()),
-    );
+    let source_functions = SourceFunctionRegistry::new(&registration.active_sources);
     let source_function_names = source_functions.names();
     let udf_table_functions = published_table_functions(config.udfs, &source_function_names)
         .map_err(|err| datafusion_to_core(&err, &[]))?;
@@ -399,7 +389,7 @@ async fn build_registered_runtime(
 async fn install_table_function_call_planners(
     ctx: &SessionContext,
     source_functions: SourceFunctionRegistry,
-    source_table_function_names: HashSet<ScopedTableFunctionName>,
+    source_table_function_names: HashSet<SqlObjectName>,
     udfs: &[UdfRuntimeDefinition],
     tables: &[TableInfo],
 ) -> Result<(), CoreError> {
@@ -431,13 +421,14 @@ fn validate_catalog_surface_namespace(
     let two_part_tables = tables
         .iter()
         .filter(|table| table.catalog_name.is_none())
-        .map(|table| ScopedTableFunctionName::from_parts(&table.schema_name, &table.table_name))
+        .map(|table| (table.schema_name.as_str(), table.table_name.as_str()))
         .collect::<HashSet<_>>();
     if let Some(function) = table_functions.iter().find(|function| {
-        two_part_tables.contains(&ScopedTableFunctionName::from_parts(
-            &function.schema_name,
-            &function.function_name,
-        ))
+        function.catalog_name.is_none()
+            && two_part_tables.contains(&(
+                function.schema_name.as_str(),
+                function.function_name.as_str(),
+            ))
     }) {
         return Err(CoreError::FailedPrecondition(format!(
             "catalog surface '{}.{}' is registered as both a table and a table function",
@@ -450,7 +441,7 @@ fn validate_catalog_surface_namespace(
 async fn install_udf_call_planner(
     ctx: &SessionContext,
     udfs: &[UdfRuntimeDefinition],
-    source_table_function_names: HashSet<ScopedTableFunctionName>,
+    source_table_function_names: HashSet<SqlObjectName>,
     tables: &[TableInfo],
 ) -> Result<(), CoreError> {
     let udf_calls = Box::pin(UdfCallRegistry::new(ctx, udfs, source_table_function_names))
@@ -532,7 +523,7 @@ async fn register_runtime_sources(
             &extension_hooks.source_observation_publishers,
             request_identity_http_authenticators,
         ) {
-            Ok(compiled) => {
+            Ok(Some(compiled)) => {
                 source_candidates.push(SourceRegistrationCandidate::Compiled(
                     CompiledQuerySource {
                         source: source.clone(),
@@ -540,6 +531,7 @@ async fn register_runtime_sources(
                     },
                 ));
             }
+            Ok(None) => {}
             Err(error) => source_candidates.push(SourceRegistrationCandidate::CompileFailed {
                 source: source.clone(),
                 error,
@@ -861,11 +853,7 @@ impl QueryRuntimeAdapter {
             .map_err(plan_error)?
             .sources()
             .iter()
-            .filter(|source_name| {
-                self.name_to_source
-                    .values()
-                    .any(|installed_name| installed_name == *source_name)
-            })
+            .filter(|source_name| source_name.as_str() != catalog::SYSTEM_SCHEMA)
             .cloned()
             .collect();
 
@@ -1034,12 +1022,16 @@ impl QueryRuntimeAdapter {
 
         let mut sources = BTreeSet::new();
         sources.extend(tables.iter().map(|usage| usage.source_name().to_string()));
-        sources.extend(
-            table_functions
-                .iter()
-                .filter(|usage| self.name_to_source.contains_key(usage.schema_name()))
-                .map(|usage| usage.source_name().to_string()),
-        );
+        sources.extend(table_functions.iter().filter_map(|usage| {
+            let sql_name = SqlObjectName::new(
+                usage
+                    .catalog_name()
+                    .unwrap_or(crate::runtime::DATAFUSION_DEFAULT_CATALOG),
+                usage.schema_name(),
+                usage.function_name(),
+            );
+            self.function_owner(&sql_name).map(ToString::to_string)
+        }));
 
         Ok(ResolvedQueryResources::new(
             sources.into_iter().collect(),
@@ -1093,18 +1085,27 @@ impl QueryRuntimeAdapter {
             return;
         };
         let catalog_name = normalize_catalog_name(table_reference.catalog());
-        if self.tables.iter().any(|table| {
+        let sql_name = SqlObjectName::new(
+            catalog_name.unwrap_or(crate::runtime::DATAFUSION_DEFAULT_CATALOG),
+            schema_name,
+            table_name,
+        );
+        if !self.tables.iter().any(|table| {
             table.catalog_name.as_deref() == catalog_name
                 && table.schema_name == schema_name
                 && table.table_name == table_name
         }) {
-            tables.insert(QueryTableUsage::new(
-                self.source_name_for(catalog_name.unwrap_or(schema_name)),
-                catalog_name,
-                schema_name,
-                table_name,
-            ));
+            return;
         }
+        let source_name = self
+            .table_owner(&sql_name)
+            .unwrap_or_else(|| catalog_name.unwrap_or(schema_name));
+        tables.insert(QueryTableUsage::new(
+            source_name,
+            catalog_name,
+            schema_name,
+            table_name,
+        ));
     }
 
     fn collect_table_function_usage(
@@ -1115,8 +1116,11 @@ impl QueryRuntimeAdapter {
         let Some((schema_name, function_name)) = relation_parts(table_reference) else {
             return false;
         };
+        let catalog_name = normalize_catalog_name(table_reference.catalog());
         if self.table_functions.iter().any(|function| {
-            function.schema_name == schema_name && function.function_name == function_name
+            function.catalog_name.as_deref() == catalog_name
+                && function.schema_name == schema_name
+                && function.function_name == function_name
         }) {
             return self.record_table_function_usage(table_reference, table_functions);
         }
@@ -1131,20 +1135,42 @@ impl QueryRuntimeAdapter {
         let Some((schema_name, function_name)) = relation_parts(table_reference) else {
             return false;
         };
+        let catalog_name = normalize_catalog_name(table_reference.catalog());
+        let sql_name = SqlObjectName::new(
+            catalog_name.unwrap_or(crate::runtime::DATAFUSION_DEFAULT_CATALOG),
+            schema_name,
+            function_name,
+        );
+        let source_name = self
+            .function_owner(&sql_name)
+            .unwrap_or_else(|| catalog_name.unwrap_or(schema_name));
         table_functions.insert(QueryTableFunctionUsage::new(
-            self.source_name_for(schema_name),
+            source_name,
+            catalog_name,
             schema_name,
             function_name,
         ));
         true
     }
 
-    /// Resolves the source owning a top-level SQL name (schema or catalog).
-    fn source_name_for(&self, name: &str) -> String {
-        self.name_to_source
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| name.to_string())
+    fn table_owner(&self, sql_name: &SqlObjectName) -> Option<&str> {
+        self.active_sources.iter().find_map(|source| {
+            source
+                .tables
+                .iter()
+                .any(|table| &table.sql_name == sql_name)
+                .then_some(source.source_name.as_str())
+        })
+    }
+
+    fn function_owner(&self, sql_name: &SqlObjectName) -> Option<&str> {
+        self.active_sources.iter().find_map(|source| {
+            source
+                .table_functions
+                .iter()
+                .any(|function| &function.sql_name == sql_name)
+                .then_some(source.source_name.as_str())
+        })
     }
 
     pub(crate) async fn explain_sql(
@@ -1514,20 +1540,6 @@ pub(crate) fn read_only_sql_options() -> SQLOptions {
         .with_allow_statements(false)
 }
 
-fn name_to_source_names(sources: &[QuerySource]) -> HashMap<String, String> {
-    sources
-        .iter()
-        .flat_map(|source| {
-            let source_name = source.source_name().to_string();
-            source
-                .schema_names()
-                .into_iter()
-                .chain(source.catalog_names())
-                .map(move |name| (name.to_string(), source_name.clone()))
-        })
-        .collect()
-}
-
 #[derive(Debug, Default, PartialEq, Eq)]
 struct TableContextFilters(Vec<(Option<String>, String)>);
 
@@ -1613,17 +1625,20 @@ mod tests {
             table_functions: Vec::new(),
             failures: Vec::new(),
             column_fetch_failures,
-            name_to_source: HashMap::new(),
             query_result_observers: Vec::new(),
         }
     }
 
     fn demo_source() -> RegisteredSource {
         RegisteredSource {
+            source_name: "demo".to_string(),
             qualified_name: SourceQualifiedName::Schema("demo".to_string()),
             tables: vec![RegisteredTable {
-                schema_name: None,
-                table_name: "events".to_string(),
+                sql_name: SqlObjectName::new(
+                    crate::runtime::DATAFUSION_DEFAULT_CATALOG,
+                    "demo",
+                    "events",
+                ),
                 description: "Event rows".to_string(),
                 guide: "Query event rows.".to_string(),
                 require_guide_read: false,
@@ -1664,10 +1679,10 @@ mod tests {
 
     fn catalog_source(catalog_name: &str, schema_name: &str) -> RegisteredSource {
         RegisteredSource {
+            source_name: catalog_name.to_string(),
             qualified_name: SourceQualifiedName::Catalog(catalog_name.to_string()),
             tables: vec![RegisteredTable {
-                schema_name: Some(schema_name.to_string()),
-                table_name: "events".to_string(),
+                sql_name: SqlObjectName::new(catalog_name, schema_name, "events"),
                 description: String::new(),
                 guide: String::new(),
                 require_guide_read: false,
@@ -1692,6 +1707,25 @@ mod tests {
             panic!("expected exact table");
         };
         assert_eq!(table.columns.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn system_table_usage_is_kept_in_resolved_resources() {
+        let adapter = adapter_with_sources(Vec::new());
+        let dataframe = adapter
+            .sql_dataframe("SELECT * FROM coral.tables", &QueryParameters::default())
+            .await
+            .expect("plan system-table query");
+        let resources = adapter
+            .resolve_query_resources(dataframe.logical_plan())
+            .expect("resolve system-table resources");
+
+        assert_eq!(resources.sources(), ["coral".to_string()]);
+        let usage = resources.tables().first().expect("system-table usage");
+        assert_eq!(usage.source_name(), "coral");
+        assert_eq!(usage.catalog_name(), None);
+        assert_eq!(usage.schema_name(), "coral");
+        assert_eq!(usage.table_name(), "tables");
     }
 
     #[tokio::test]
@@ -1862,7 +1896,12 @@ mod tests {
 
         assert_eq!(catalog.table_functions.len(), 1);
         assert_eq!(
-            catalog.table_functions[0].catalog_name.as_deref(),
+            catalog
+                .table_functions
+                .first()
+                .expect("catalog function")
+                .catalog_name
+                .as_deref(),
             Some("github_v4")
         );
     }
@@ -1901,10 +1940,14 @@ mod tests {
     #[tokio::test]
     async fn catalog_info_for_source_schema_excludes_database_internal_schema() {
         let schema_source = RegisteredSource {
+            source_name: "public".to_string(),
             qualified_name: SourceQualifiedName::Schema("public".to_string()),
             tables: vec![RegisteredTable {
-                schema_name: None,
-                table_name: "events".to_string(),
+                sql_name: SqlObjectName::new(
+                    crate::runtime::DATAFUSION_DEFAULT_CATALOG,
+                    "public",
+                    "events",
+                ),
                 description: String::new(),
                 guide: String::new(),
                 require_guide_read: false,

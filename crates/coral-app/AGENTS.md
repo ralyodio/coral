@@ -143,7 +143,7 @@ root.
   not reimplement table matching, column filtering, pagination, or
   missing-table context.
 - `sources/runtime_package.rs` owns app-level conversion from installed source
-  state and materialized artifacts into the generic runtime components accepted
+  state and materialized artifacts into the generic runtime catalog accepted
   by `coral-engine`.
 - For all service calls, keep protobuf request/response types confined to the
   service edge. Convert request data into small app-local command, query, or

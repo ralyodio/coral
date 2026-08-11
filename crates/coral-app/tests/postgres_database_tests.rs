@@ -10,7 +10,8 @@ use std::fs;
 
 use coral_client::local::ServerBuilder;
 use coral_engine::{
-    CoralQuery, QueryRuntimeConfig, QuerySource, RuntimeSourceComponent, RuntimeSourcePackage,
+    CoralQuery, DatabaseRuntimeBackend, DatabaseRuntimeCatalog, QueryRuntimeConfig, QuerySource,
+    RuntimeSourcePackage,
 };
 use coral_spec::{
     DatabaseConnectionSpec, DatabaseSourceManifest, ParsedTemplate, PostgresConnectionSpec,
@@ -45,8 +46,9 @@ async fn server_lifecycle_can_start_with_postgres_database_config() {
 }
 
 #[tokio::test]
-#[ignore = "set CORAL_TEST_POSTGRES_URL to run Postgres source inventory coverage"]
-async fn postgres_source_inventory_reads_information_schema_domain_columns_as_utf8() {
+#[ignore = "set CORAL_TEST_POSTGRES_URL to run canonical Postgres catalog coverage"]
+async fn postgres_discovered_catalog_uses_canonical_sql_and_remote_columns_with_failure_isolation()
+{
     let Some(database_url) = postgres_test_url() else {
         return;
     };
@@ -72,10 +74,34 @@ async fn postgres_source_inventory_reads_information_schema_domain_columns_as_ut
     .execute(&pool)
     .await
     .expect("create inventory fixture table");
+    sqlx::query(
+        "INSERT INTO coral_inventory.column_types (id, display_name, note)
+         VALUES (1, 'Ada', 'canonical catalog fixture')",
+    )
+    .execute(&pool)
+    .await
+    .expect("populate inventory fixture table");
 
-    let source = postgres_source(&database_url);
+    let mut unreachable_url = url::Url::parse(&database_url).expect("parse Postgres test URL");
+    unreachable_url
+        .set_port(Some(1))
+        .expect("set unreachable Postgres port");
+    let sources = vec![
+        postgres_source_named(unreachable_url.as_str(), "broken_postgres"),
+        postgres_source(&database_url),
+    ];
+
+    let result = CoralQuery::execute_sql(
+        &sources,
+        QueryRuntimeConfig::default(),
+        "SELECT display_name FROM postgres_inventory.coral_inventory.column_types WHERE id = 1",
+    )
+    .await
+    .expect("query canonical Postgres table while another source fails");
+    assert_eq!(result.row_count(), 1);
+
     let tables = CoralQuery::list_tables(
-        &[source],
+        &sources,
         QueryRuntimeConfig::default(),
         Some("postgres_inventory"),
         Some("coral_inventory"),
@@ -85,7 +111,11 @@ async fn postgres_source_inventory_reads_information_schema_domain_columns_as_ut
     .expect("read Postgres column inventory through coral.columns");
 
     assert_eq!(tables.len(), 1);
-    let columns = &tables.first().expect("inventory fixture table").columns;
+    let table = tables.first().expect("inventory fixture table");
+    assert_eq!(table.catalog_name.as_deref(), Some("postgres_inventory"));
+    assert_eq!(table.schema_name, "coral_inventory");
+    assert_eq!(table.table_name, "column_types");
+    let columns = &table.columns;
     assert_eq!(columns.len(), 3);
     let id = columns.first().expect("id column metadata");
     assert_eq!(id.name, "id");
@@ -105,6 +135,10 @@ async fn postgres_source_inventory_reads_information_schema_domain_columns_as_ut
 }
 
 fn postgres_source(database_url: &str) -> QuerySource {
+    postgres_source_named(database_url, "postgres_inventory")
+}
+
+fn postgres_source_named(database_url: &str, source_name: &str) -> QuerySource {
     let url = url::Url::parse(database_url).expect("parse Postgres test URL");
     let host = url.host_str().expect("Postgres test URL host");
     let port = url.port_or_known_default().expect("Postgres test URL port");
@@ -123,7 +157,7 @@ fn postgres_source(database_url: &str) -> QuerySource {
     let manifest = DatabaseSourceManifest {
         common: SourceManifestCommon {
             dsl_version: 4,
-            name: "postgres_inventory".to_string(),
+            name: source_name.to_string(),
             version: String::new(),
             description: "Postgres inventory integration fixture".to_string(),
             test_queries: Vec::new(),
@@ -138,15 +172,22 @@ fn postgres_source(database_url: &str) -> QuerySource {
         }),
         declared_inputs: Vec::new(),
     };
-    QuerySource::from_runtime_components(
+    QuerySource::from_runtime_catalog(
         RuntimeSourcePackage {
-            source_name: "postgres_inventory".to_string(),
+            source_name: source_name.to_string(),
             authored_version: None,
             description: String::new(),
             declared_inputs: Vec::new(),
             test_queries: Vec::new(),
             identity_requirements: None,
-            components: vec![RuntimeSourceComponent::Database(manifest)],
+            catalog: Some(
+                DatabaseRuntimeCatalog::try_new(
+                    source_name,
+                    DatabaseRuntimeBackend::from_manifest(manifest),
+                )
+                .expect("database runtime catalog")
+                .into(),
+            ),
         },
         BTreeMap::new(),
         BTreeMap::new(),

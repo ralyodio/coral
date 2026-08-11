@@ -153,7 +153,7 @@ impl SourceDecorator for CatalogFailureRecorder {
         "catalog_failure_recorder"
     }
 
-    fn supports_catalog_sources(&self) -> bool {
+    fn supports_discovered_catalogs(&self) -> bool {
         true
     }
 
@@ -2104,6 +2104,7 @@ mod tests {
             ],
             vec![QueryTableFunctionUsage::new(
                 "github",
+                None,
                 "github",
                 "search_issues",
             )],

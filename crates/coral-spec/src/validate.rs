@@ -778,7 +778,15 @@ fn validate_arg_template(
     Ok(())
 }
 
-pub(crate) fn validate_identifier(value: &str, context: &str) -> Result<()> {
+/// Validates one SQL-compatible identifier used by source specifications and
+/// runtime catalog coordinates.
+///
+/// # Errors
+///
+/// Returns [`ManifestError::Validation`] when the value is empty, starts with
+/// an unsupported character, or contains characters outside ASCII letters,
+/// numbers, and underscores.
+pub fn validate_identifier(value: &str, context: &str) -> Result<()> {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
         return Err(ManifestError::validation(format!(

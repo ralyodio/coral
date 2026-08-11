@@ -97,7 +97,7 @@
   `coral-spec`, app/state concerns in `coral-app`, and query/runtime
   concerns in `coral-engine`.
 - Keep app-owned runtime package assembly in `coral-app`. `coral-engine`
-  should compile generic runtime components, not interpret DSL v4 authored
+  should compile the generic runtime catalog, not interpret DSL v4 authored
   manifests, materialized fingerprints, semantic IR, or projection catalogs.
 - Keep Reef Coral access behind React Router server loaders, actions, or
   resource routes using `apps/reef/app/lib/coral-request.server.ts`. Do not

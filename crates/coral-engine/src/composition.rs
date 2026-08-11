@@ -14,10 +14,58 @@ use serde_json::Value;
 use crate::CoreError;
 use crate::contracts::{QueryExecutionProvenance, QuerySource};
 use coral_spec::v4::IdentityRequirements;
-use coral_spec::{ManifestInputKind, ManifestInputSpec};
+use coral_spec::{ManifestInputKind, ManifestInputSpec, SqlObjectName};
 
-/// One source's table providers keyed by manifest table name.
-pub type SourceTables = HashMap<String, Arc<dyn TableProvider>>;
+/// One source's replaceable table providers keyed by complete SQL identity.
+pub struct SourceTables {
+    tables: BTreeMap<coral_spec::SqlObjectName, Arc<dyn TableProvider>>,
+}
+
+impl SourceTables {
+    /// Iterates over complete SQL identities and their providers.
+    pub fn iter(
+        &self,
+    ) -> impl Iterator<Item = (&coral_spec::SqlObjectName, &Arc<dyn TableProvider>)> {
+        self.tables.iter()
+    }
+
+    /// Returns the provider for one complete SQL identity.
+    #[must_use]
+    pub fn get(&self, sql_name: &coral_spec::SqlObjectName) -> Option<&Arc<dyn TableProvider>> {
+        self.tables.get(sql_name)
+    }
+
+    /// Replaces providers without allowing identities to be inserted, removed, or renamed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SourceDecoratorError`] when the mapping function rejects a provider.
+    pub fn try_map_providers<F>(self, mut map: F) -> Result<Self, SourceDecoratorError>
+    where
+        F: FnMut(
+            &coral_spec::SqlObjectName,
+            Arc<dyn TableProvider>,
+        ) -> Result<Arc<dyn TableProvider>, SourceDecoratorError>,
+    {
+        let tables = self
+            .tables
+            .into_iter()
+            .map(|(sql_name, provider)| {
+                let provider = map(&sql_name, provider)?;
+                Ok((sql_name, provider))
+            })
+            .collect::<Result<_, SourceDecoratorError>>()?;
+        Ok(Self { tables })
+    }
+
+    pub(crate) fn new(tables: BTreeMap<coral_spec::SqlObjectName, Arc<dyn TableProvider>>) -> Self {
+        Self { tables }
+    }
+
+    pub(crate) fn into_inner(self) -> BTreeMap<coral_spec::SqlObjectName, Arc<dyn TableProvider>> {
+        self.tables
+    }
+}
 
 /// Neutral bundle of optional engine extensions for one runtime build.
 #[derive(Default)]
@@ -93,12 +141,10 @@ pub enum SourceObservationSurfaceKind {
 /// One typed source-scan batch observed during shared source execution.
 #[derive(Debug, Clone, Copy)]
 pub struct SourceScanObservation<'a> {
-    /// Source/schema name.
-    pub source_name: &'a str,
+    /// Complete SQL identity of the scanned table or function.
+    pub sql_name: &'a SqlObjectName,
     /// Kind of source surface.
     pub surface_kind: SourceObservationSurfaceKind,
-    /// Table or function name within the source.
-    pub surface_name: &'a str,
     /// Typed, table-shaped batch. Consumers that need to retain data must clone
     /// or enqueue it themselves.
     pub batch: &'a RecordBatch,
@@ -541,14 +587,14 @@ pub trait SourceDecorator: Send + Sync {
     /// Stable decorator name used in diagnostics.
     fn name(&self) -> &'static str;
 
-    /// Whether this decorator supports sources registered as `SQL` catalogs.
+    /// Whether this decorator supports catalogs discovered by their backend.
     ///
     /// Catalog-backed sources expose table providers lazily, so
     /// [`SourceDecorator::decorate_source`] is not called for them. Decorators
     /// should return `true` only when their guarantees remain intact without
     /// decorating those table providers, such as when they only observe
     /// registration lifecycle events.
-    fn supports_catalog_sources(&self) -> bool {
+    fn supports_discovered_catalogs(&self) -> bool {
         false
     }
 

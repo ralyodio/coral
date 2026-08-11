@@ -1,7 +1,7 @@
 //! HTTP-backed source runtime pieces: request client, provider, and
 //! backend-specific query errors.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -13,18 +13,21 @@ use crate::backends::shared::source_observation::{
     SourceObservationPublishers, source_observation_publishers,
 };
 use crate::backends::{
-    BackendCompileRequest, BackendRegistration, BackendRegistrationContext,
-    BackendSchemaRegistration, CompiledBackendSource, RegisteredSource, RegisteredTable,
-    SourceFunctionProviderFactory, SourceQualifiedName, build_registered_inputs,
+    BackendCompileRequest, BackendRegistrationContext, CatalogPreparation, CatalogTarget,
+    CompiledBackendCatalog, RegisteredSource, RegisteredTable, RegisteredTableFunction,
+    SourceFunctionProviderFactory, StaticCatalogDraft, build_registered_inputs,
     build_registered_table, build_registered_table_function, registered_columns_from_specs,
     required_filter_names, validate_lookup_key_filter_backend_support,
 };
+use crate::runtime::error::datafusion_to_core;
 use crate::{
-    BoundRequestIdentityHttpAuthenticator, RequestAuthenticator, SourceInputResolutionContext,
-    SourceInputResolver,
+    BoundRequestIdentityHttpAuthenticator, HttpRuntimeCatalog, RequestAuthenticator,
+    SourceInputResolutionContext, SourceInputResolver,
 };
 use coral_spec::SourceBackend;
-use coral_spec::backends::http::{HttpSourceManifest, HttpTableSpec};
+#[cfg(test)]
+use coral_spec::backends::http::HttpSourceManifest;
+use coral_spec::backends::http::HttpTableSpec;
 pub(crate) mod auth;
 pub(crate) mod client;
 pub(crate) mod error;
@@ -50,7 +53,8 @@ pub(crate) use provider::HttpSourceTableProvider;
 
 #[derive(Clone)]
 struct HttpCompiledSource {
-    manifest: HttpSourceManifest,
+    source_name: String,
+    catalog: HttpRuntimeCatalog,
     source_input_resolution: SourceInputResolutionContext,
     request_authenticators: HashMap<String, Arc<dyn RequestAuthenticator>>,
     body_capture_max_bytes: Option<usize>,
@@ -60,13 +64,30 @@ struct HttpCompiledSource {
     request_identity_http_authenticator: Option<BoundRequestIdentityHttpAuthenticator>,
 }
 
+type CompiledHttpTables = (
+    BTreeMap<coral_spec::SqlObjectName, Arc<dyn TableProvider>>,
+    Vec<RegisteredTable>,
+);
+
+#[cfg(test)]
 pub(crate) fn compile_manifest(
     manifest: &HttpSourceManifest,
     request: &BackendCompileRequest<'_>,
     request_identity_http_authenticator: Option<BoundRequestIdentityHttpAuthenticator>,
-) -> Box<dyn CompiledBackendSource> {
+) -> Box<dyn CompiledBackendCatalog> {
+    let catalog = HttpRuntimeCatalog::try_from_default_catalog_manifest(manifest.clone())
+        .expect("validated HTTP manifest produces a valid runtime catalog");
+    compile_runtime_catalog(&catalog, request, request_identity_http_authenticator)
+}
+
+pub(crate) fn compile_runtime_catalog(
+    catalog: &HttpRuntimeCatalog,
+    request: &BackendCompileRequest<'_>,
+    request_identity_http_authenticator: Option<BoundRequestIdentityHttpAuthenticator>,
+) -> Box<dyn CompiledBackendCatalog> {
     Box::new(HttpCompiledSource {
-        manifest: manifest.clone(),
+        source_name: request.source.source_name().to_string(),
+        catalog: catalog.clone(),
         source_input_resolution: SourceInputResolutionContext::from_query_source(request.source),
         request_authenticators: request.request_authenticators.clone(),
         body_capture_max_bytes: request.runtime_context.body_capture_max_bytes,
@@ -80,35 +101,36 @@ pub(crate) fn compile_manifest(
 }
 
 #[async_trait]
-impl CompiledBackendSource for HttpCompiledSource {
-    fn qualified_name(&self) -> SourceQualifiedName {
-        SourceQualifiedName::Schema(self.manifest.common.name.clone())
-    }
-
-    fn source_name(&self) -> &str {
-        &self.manifest.common.name
-    }
-
-    fn validate_runtime_capabilities(&self) -> Result<()> {
-        validate_lookup_key_filter_backend_support(
-            self.source_name(),
-            SourceBackend::Http,
-            self.manifest
-                .tables
-                .iter()
-                .flat_map(HttpTableSpec::filters)
-                .any(|filter| filter.lookup_key),
-        )
-    }
-
-    async fn register(
+impl CompiledBackendCatalog for HttpCompiledSource {
+    async fn stage(
         &self,
         _ctx: &SessionContext,
         registration: &BackendRegistrationContext,
-    ) -> Result<BackendRegistration> {
+        preparation: &mut CatalogPreparation<'_>,
+    ) -> std::result::Result<(), crate::CoreError> {
+        let draft = self
+            .build_static_draft(registration)
+            .map_err(|error| datafusion_to_core(&error, &[]))?;
+        preparation.stage_static(draft)
+    }
+}
+
+impl HttpCompiledSource {
+    fn build_static_draft(
+        &self,
+        registration: &BackendRegistrationContext,
+    ) -> Result<StaticCatalogDraft> {
+        validate_lookup_key_filter_backend_support(
+            &self.source_name,
+            SourceBackend::Http,
+            self.catalog
+                .table_relations()
+                .flat_map(|(_, table)| table.filters())
+                .any(|filter| filter.lookup_key),
+        )?;
         let http = client::default_http_client(
             registration,
-            &self.manifest.common.name,
+            &self.source_name,
             self.request_identity_http_authenticator.is_some(),
         )?;
         let runtime = HttpSourceClientRuntime::new(
@@ -119,41 +141,15 @@ impl CompiledBackendSource for HttpCompiledSource {
             self.trace_context.clone(),
             http,
         );
-        let backend = HttpSourceClient::from_manifest_with_source_input_resolver(
-            &self.manifest,
-            self.source_input_resolution.secrets(),
-            self.source_input_resolution.variables(),
+        let backend = HttpSourceClient::from_runtime_catalog(
+            &self.source_name,
+            &self.catalog,
+            &self.source_input_resolution,
             &self.request_authenticators,
             runtime,
         )?;
-        let mut tables: HashMap<String, Arc<dyn TableProvider>> = HashMap::new();
-        let mut table_infos = Vec::with_capacity(self.manifest.tables.len());
-
-        for table in &self.manifest.tables {
-            let provider: Arc<dyn TableProvider> = Arc::new(HttpSourceTableProvider::new(
-                backend.clone(),
-                self.manifest.common.name.clone(),
-                table.clone(),
-                Arc::clone(&self.source_observation_publishers),
-            )?);
-            tables.insert(table.name().to_string(), provider);
-            table_infos.push(registered_table(table));
-        }
-        let mut table_function_infos = Vec::with_capacity(self.manifest.functions.len());
-        for function in &self.manifest.functions {
-            let factory: Arc<dyn SourceFunctionProviderFactory> =
-                Arc::new(function::HttpSourceTableFunction::new(
-                    backend.clone(),
-                    self.manifest.common.name.clone(),
-                    function.clone(),
-                    Arc::clone(&self.source_observation_publishers),
-                )?);
-            table_function_infos.push(build_registered_table_function(
-                &self.manifest.common.name,
-                function,
-                factory,
-            ));
-        }
+        let (tables, table_infos) = self.build_tables(&backend)?;
+        let table_function_infos = self.build_table_functions(&backend)?;
 
         let secret_keys = self
             .source_input_resolution
@@ -167,25 +163,65 @@ impl CompiledBackendSource for HttpCompiledSource {
             &secret_keys,
         );
 
-        Ok(BackendRegistration {
-            schemas: vec![BackendSchemaRegistration {
-                tables,
-                source: RegisteredSource {
-                    qualified_name: SourceQualifiedName::Schema(self.manifest.common.name.clone()),
-                    tables: table_infos,
-                    table_functions: table_function_infos,
-                    inputs,
-                },
-            }],
-            catalogs: Vec::new(),
+        let target = CatalogTarget::new(self.catalog.catalog_name());
+        let qualified_name = target.source_qualified_name(&self.source_name);
+        Ok(StaticCatalogDraft {
+            target,
+            tables,
+            source: RegisteredSource {
+                source_name: self.source_name.clone(),
+                qualified_name,
+                tables: table_infos,
+                table_functions: table_function_infos,
+                inputs,
+            },
         })
+    }
+
+    fn build_tables(&self, backend: &HttpSourceClient) -> Result<CompiledHttpTables> {
+        let mut tables = BTreeMap::new();
+        let mut table_infos = Vec::new();
+        for (sql_name, table) in self.catalog.table_relations() {
+            let provider: Arc<dyn TableProvider> = Arc::new(HttpSourceTableProvider::new(
+                backend.clone(),
+                sql_name.clone(),
+                table.clone(),
+                Arc::clone(&self.source_observation_publishers),
+            )?);
+            tables.insert(sql_name.clone(), provider);
+            table_infos.push(registered_table(sql_name.clone(), table));
+        }
+        Ok((tables, table_infos))
+    }
+
+    fn build_table_functions(
+        &self,
+        backend: &HttpSourceClient,
+    ) -> Result<Vec<RegisteredTableFunction>> {
+        self.catalog
+            .function_relations()
+            .map(|(sql_name, function)| {
+                let factory: Arc<dyn SourceFunctionProviderFactory> =
+                    Arc::new(function::HttpSourceTableFunction::new(
+                        backend.clone(),
+                        sql_name.clone(),
+                        function.clone(),
+                        Arc::clone(&self.source_observation_publishers),
+                    )?);
+                Ok(build_registered_table_function(
+                    sql_name.clone(),
+                    function,
+                    factory,
+                ))
+            })
+            .collect()
     }
 }
 
-fn registered_table(table: &HttpTableSpec) -> RegisteredTable {
+fn registered_table(sql_name: coral_spec::SqlObjectName, table: &HttpTableSpec) -> RegisteredTable {
     let required_filters = required_filter_names(table.filters());
     let columns = registered_columns_from_specs(table.columns(), table.filters());
-    build_registered_table(&table.common, columns, required_filters)
+    build_registered_table(sql_name, &table.common, columns, required_filters)
 }
 
 #[cfg(test)]
@@ -332,7 +368,8 @@ mod tests {
         let people_scan = observations
             .iter()
             .find(|observation| {
-                observation.source_name == "people_api" && observation.surface_name == "people"
+                observation.sql_name
+                    == coral_spec::SqlObjectName::new("datafusion", "people_api", "people")
             })
             .expect("people scan should be observed");
 
@@ -421,7 +458,8 @@ mod tests {
         let people_scan = observations
             .iter()
             .find(|observation| {
-                observation.source_name == "people_api" && observation.surface_name == "people"
+                observation.sql_name
+                    == coral_spec::SqlObjectName::new("datafusion", "people_api", "people")
             })
             .expect("people scan should be observed");
 
@@ -500,7 +538,8 @@ mod tests {
         let people_scan = observations
             .iter()
             .find(|observation| {
-                observation.source_name == "people_api" && observation.surface_name == "people"
+                observation.sql_name
+                    == coral_spec::SqlObjectName::new("datafusion", "people_api", "people")
             })
             .expect("dependent people scan should be observed");
 

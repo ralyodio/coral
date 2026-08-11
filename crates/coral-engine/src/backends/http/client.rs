@@ -16,11 +16,17 @@ use crate::backends::http::registration_checks::validate_source_scoped_http_conf
 use crate::backends::http::target::HttpFetchTarget;
 use crate::backends::http::trace::HttpBodyCapture;
 use crate::{
-    BoundRequestIdentityHttpAuthenticator, RequestAuthenticator, SourceInputResolutionContext,
-    SourceInputResolver, SourceInputResolverError,
+    BoundRequestIdentityHttpAuthenticator, HttpRuntimeBackend, HttpRuntimeCatalog,
+    RequestAuthenticator, SourceInputResolutionContext, SourceInputResolver,
+    SourceInputResolverError,
 };
-use coral_spec::backends::http::{HttpSourceManifest, RateLimitSpec};
-use coral_spec::{AuthSpec, HeaderSpec, ParsedTemplate, RequestSpec as ManifestRequestSpec};
+#[cfg(test)]
+use coral_spec::backends::http::HttpSourceManifest;
+use coral_spec::backends::http::{HttpTableSpec, RateLimitSpec};
+use coral_spec::{
+    AuthSpec, HeaderSpec, ManifestInputSpec, ParsedTemplate, RequestSpec as ManifestRequestSpec,
+    SourceTableFunctionSpec,
+};
 
 const DEFAULT_HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_HTTP_USER_AGENT: &str = concat!("coral/", env!("CARGO_PKG_VERSION"));
@@ -50,6 +56,16 @@ pub(crate) struct HttpSourceClientRuntime {
     body_capture_max_bytes: Option<usize>,
     trace_context: Option<OtelContext>,
     http: reqwest::Client,
+}
+
+struct HttpSourceClientDefinition<'a> {
+    source_name: &'a str,
+    backend: &'a HttpRuntimeBackend,
+    tables: Vec<&'a HttpTableSpec>,
+    functions: Vec<&'a SourceTableFunctionSpec>,
+    declared_inputs: &'a [ManifestInputSpec],
+    source_secrets: &'a BTreeMap<String, String>,
+    source_variables: &'a BTreeMap<String, String>,
 }
 
 impl HttpSourceClientRuntime {
@@ -161,56 +177,87 @@ impl HttpSourceClient {
         body_capture_max_bytes: Option<usize>,
         http: reqwest::Client,
     ) -> Result<Self> {
+        let backend = HttpRuntimeBackend::from_manifest(manifest);
+        let tables = manifest.tables.iter().collect::<Vec<_>>();
+        let functions = manifest.functions.iter().collect::<Vec<_>>();
         Self::build(
-            manifest,
-            source_secrets,
-            source_variables,
+            &HttpSourceClientDefinition {
+                source_name: &manifest.common.name,
+                backend: &backend,
+                tables,
+                functions,
+                declared_inputs: &manifest.declared_inputs,
+                source_secrets,
+                source_variables,
+            },
             request_authenticators,
             HttpSourceClientRuntime::static_inputs(body_capture_max_bytes, http),
         )
     }
 
-    pub(crate) fn from_manifest_with_source_input_resolver(
-        manifest: &HttpSourceManifest,
-        source_secrets: &BTreeMap<String, String>,
-        source_variables: &BTreeMap<String, String>,
+    pub(crate) fn from_runtime_catalog(
+        source_name: &str,
+        catalog: &HttpRuntimeCatalog,
+        source_input_resolution: &SourceInputResolutionContext,
         request_authenticators: &HashMap<String, Arc<dyn RequestAuthenticator>>,
         runtime: HttpSourceClientRuntime,
     ) -> Result<Self> {
+        let tables = catalog
+            .table_relations()
+            .map(|(_, table)| table)
+            .collect::<Vec<_>>();
+        let functions = catalog
+            .function_relations()
+            .map(|(_, function)| function)
+            .collect::<Vec<_>>();
         Self::build(
-            manifest,
-            source_secrets,
-            source_variables,
+            &HttpSourceClientDefinition {
+                source_name,
+                backend: catalog.backend(),
+                tables,
+                functions,
+                declared_inputs: source_input_resolution.declared_inputs(),
+                source_secrets: source_input_resolution.secrets(),
+                source_variables: source_input_resolution.variables(),
+            },
             request_authenticators,
             runtime,
         )
     }
 
     fn build(
-        manifest: &HttpSourceManifest,
-        source_secrets: &BTreeMap<String, String>,
-        source_variables: &BTreeMap<String, String>,
+        definition: &HttpSourceClientDefinition<'_>,
         request_authenticators: &HashMap<String, Arc<dyn RequestAuthenticator>>,
         runtime: HttpSourceClientRuntime,
     ) -> Result<Self> {
-        let resolved_inputs =
-            coral_spec::resolve_inputs(&manifest.declared_inputs, source_secrets, source_variables);
-        validate_source_scoped_http_config(manifest, request_authenticators, &resolved_inputs)?;
+        let resolved_inputs = coral_spec::resolve_inputs(
+            definition.declared_inputs,
+            definition.source_secrets,
+            definition.source_variables,
+        );
+        validate_source_scoped_http_config(
+            definition.source_name,
+            definition.backend,
+            &definition.tables,
+            &definition.functions,
+            request_authenticators,
+            &resolved_inputs,
+        )?;
 
         let request_timeout = Duration::from_secs(DEFAULT_HTTP_REQUEST_TIMEOUT_SECS);
 
         Ok(Self {
             http: runtime.http,
             request_timeout,
-            source_schema: manifest.common.name.clone(),
-            base_url: manifest.base_url.clone(),
-            auth: manifest.auth.clone(),
-            request_headers: manifest.request_headers.clone(),
+            source_schema: definition.source_name.to_string(),
+            base_url: definition.backend.base_url.clone(),
+            auth: definition.backend.auth.clone(),
+            request_headers: definition.backend.request_headers.clone(),
             request_authenticators: request_authenticators.clone(),
             source_input_resolution_context: runtime.source_input_resolution_context,
             source_input_resolver: runtime.source_input_resolver,
             request_identity_http_authenticator: runtime.request_identity_http_authenticator,
-            rate_limit: manifest.rate_limit.clone(),
+            rate_limit: definition.backend.rate_limit.clone(),
             resolved_inputs: Arc::new(resolved_inputs),
             body_capture: HttpBodyCapture::new(runtime.body_capture_max_bytes),
             trace_context: runtime.trace_context,

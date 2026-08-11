@@ -6,9 +6,15 @@
 
 use std::collections::BTreeMap;
 
-use coral_engine::{CoralQuery, CoreError, QuerySource, TableInfo};
+use coral_engine::{
+    CoralQuery, CoreError, HttpRuntimeBackend, HttpRuntimeCatalog, HttpRuntimeRelation,
+    QuerySource, RuntimeSourcePackage, TableInfo,
+};
+use coral_spec::{SqlObjectName, parse_source_manifest_yaml};
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::harness::{
     assert_table_not_found, build_source, build_source_with_inputs, dir_url, execution_to_rows,
@@ -90,6 +96,120 @@ fn build_catalog_sources() -> (TempDir, Vec<QuerySource>) {
 }
 
 const SYSTEM_TABLE_NAMES: &[&str] = &["columns", "filters", "inputs", "table_functions", "tables"];
+
+fn v4_http_manifest(base_url: &str) -> coral_spec::backends::http::HttpSourceManifest {
+    let mut manifest = parse_source_manifest_yaml(&format!(
+        r"
+name: github_v4
+version: 1.0.0
+dsl_version: 3
+backend: http
+base_url: {base_url}
+tables:
+  - name: issues
+    description: Issues
+    request:
+      method: GET
+      path: /issues
+    response: {{}}
+    columns:
+      - name: id
+        type: Int64
+      - name: title
+        type: Utf8
+"
+    ))
+    .expect("HTTP manifest")
+    .as_http()
+    .expect("HTTP source")
+    .clone();
+    manifest.common.dsl_version = 4;
+    manifest
+}
+
+#[tokio::test]
+async fn v4_static_http_table_uses_source_named_catalog() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/issues"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"id": 1, "title": "Issue"}
+        ])))
+        .mount(&server)
+        .await;
+    let manifest = v4_http_manifest(&server.uri());
+    let relation = HttpRuntimeRelation::try_table(
+        SqlObjectName::new("github_v4", "issues", "issues"),
+        manifest.tables.first().expect("issues table").clone(),
+    )
+    .expect("runtime relation");
+    let catalog = HttpRuntimeCatalog::try_new(
+        "github_v4",
+        HttpRuntimeBackend::from_manifest(&manifest),
+        vec![relation],
+    )
+    .expect("runtime catalog");
+    let source = QuerySource::from_runtime_catalog(
+        RuntimeSourcePackage {
+            source_name: "github_v4".to_string(),
+            authored_version: Some("1.0.0".to_string()),
+            description: "GitHub v4".to_string(),
+            declared_inputs: Vec::new(),
+            test_queries: Vec::new(),
+            identity_requirements: None,
+            catalog: Some(catalog.into()),
+        },
+        BTreeMap::new(),
+        BTreeMap::new(),
+    )
+    .expect("query source");
+
+    let execution = CoralQuery::execute_sql(
+        std::slice::from_ref(&source),
+        test_runtime(),
+        "SELECT id, title FROM github_v4.issues.issues",
+    )
+    .await
+    .expect("three-part query");
+    let rows = execution_to_rows(&execution);
+    assert_eq!(rows, vec![json!({"id": 1, "title": "Issue"})]);
+    let usage = execution
+        .provenance()
+        .tables()
+        .first()
+        .expect("table provenance");
+    assert_eq!(usage.source_name(), "github_v4");
+    assert_eq!(usage.catalog_name(), Some("github_v4"));
+    assert_eq!(usage.schema_name(), "issues");
+    assert_eq!(usage.table_name(), "issues");
+
+    let catalog_rows = execution_to_rows(
+        &CoralQuery::execute_sql(
+            std::slice::from_ref(&source),
+            test_runtime(),
+            "SELECT catalog_name, schema_name, table_name FROM coral.tables \
+             WHERE catalog_name = 'github_v4'",
+        )
+        .await
+        .expect("catalog query"),
+    );
+    assert_eq!(
+        catalog_rows,
+        vec![json!({
+            "catalog_name": "github_v4",
+            "schema_name": "issues",
+            "table_name": "issues"
+        })]
+    );
+
+    let error = CoralQuery::execute_sql(&[source], test_runtime(), "SELECT id FROM issues.issues")
+        .await
+        .expect_err("former two-part name must fail");
+    assert!(
+        error.to_string().contains("github_v4.issues.issues"),
+        "error should provide the canonical identity: {error}"
+    );
+}
 
 #[tokio::test]
 async fn coral_tables_lists_installed_sources() {

@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use coral_spec::{
     ColumnSpec, DO_NOT_INDEX_COLUMN_METADATA_KEY, FilterSpec, ManifestDataType, ManifestInputKind,
     ManifestInputSpec, SearchLimitsSpec, SourceBackend, SourceTableFunctionKind,
-    SourceTableFunctionSpec, TableCommon,
+    SourceTableFunctionSpec, SqlObjectName, TableCommon,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::catalog::CatalogProvider;
@@ -63,10 +63,8 @@ pub(crate) struct RegisteredColumn {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RegisteredTable {
-    /// SQL schema containing this table when it differs from the source's
-    /// default schema. Database tables set this to their remote schema.
-    pub(crate) schema_name: Option<String>,
-    pub(crate) table_name: String,
+    /// Complete SQL identity used to publish and resolve this table.
+    pub(crate) sql_name: SqlObjectName,
     pub(crate) description: String,
     pub(crate) guide: String,
     pub(crate) require_guide_read: bool,
@@ -78,8 +76,8 @@ pub(crate) struct RegisteredTable {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RegisteredTableFunction {
-    pub(crate) schema_name: String,
-    pub(crate) function_name: String,
+    /// Complete SQL identity used to publish and resolve this table function.
+    pub(crate) sql_name: SqlObjectName,
     pub(crate) factory: Arc<dyn SourceFunctionProviderFactory>,
     pub(crate) kind: SourceTableFunctionKind,
     pub(crate) description: String,
@@ -133,7 +131,7 @@ pub(crate) struct RegisteredInput {
 /// (`catalog.schema.table`): which position its name occupies and what that
 /// name is. Names for all selected sources share one flat namespace
 /// regardless of variant.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum SourceQualifiedName {
     /// Two-part source: tables resolve as `datafusion.<name>.<table>`.
     Schema(String),
@@ -145,7 +143,7 @@ pub(crate) enum SourceQualifiedName {
 impl SourceQualifiedName {
     pub(crate) fn name(&self) -> &str {
         match self {
-            Self::Schema(name) | Self::Catalog(name) => name,
+            Self::Catalog(name) | Self::Schema(name) => name,
         }
     }
 
@@ -159,26 +157,70 @@ impl SourceQualifiedName {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RegisteredSource {
+    /// Canonical installed source that owns every registered relation below.
+    pub(crate) source_name: String,
     pub(crate) qualified_name: SourceQualifiedName,
     pub(crate) tables: Vec<RegisteredTable>,
     pub(crate) table_functions: Vec<RegisteredTableFunction>,
     pub(crate) inputs: Vec<RegisteredInput>,
 }
 
-pub(crate) struct BackendRegistration {
-    pub(crate) schemas: Vec<BackendSchemaRegistration>,
-    pub(crate) catalogs: Vec<BackendCatalogRegistration>,
+pub(crate) type SqlIdentifier = String;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum CatalogPublication {
+    ExtendExisting,
+    InstallNew,
 }
 
-pub(crate) struct BackendSchemaRegistration {
-    pub(crate) tables: HashMap<String, Arc<dyn TableProvider>>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CatalogTarget {
+    pub(crate) catalog_name: SqlIdentifier,
+    pub(crate) publication: CatalogPublication,
+}
+
+impl CatalogTarget {
+    pub(crate) fn new(catalog_name: impl Into<SqlIdentifier>) -> Self {
+        let catalog_name = catalog_name.into();
+        let publication = if catalog_name == crate::runtime::DATAFUSION_DEFAULT_CATALOG {
+            CatalogPublication::ExtendExisting
+        } else {
+            CatalogPublication::InstallNew
+        };
+        Self {
+            catalog_name,
+            publication,
+        }
+    }
+
+    pub(crate) fn source_qualified_name(&self, source_name: &str) -> SourceQualifiedName {
+        if self.publication == CatalogPublication::ExtendExisting {
+            SourceQualifiedName::Schema(source_name.to_string())
+        } else {
+            SourceQualifiedName::Catalog(self.catalog_name.clone())
+        }
+    }
+}
+
+pub(crate) struct StaticCatalogDraft {
+    pub(crate) target: CatalogTarget,
+    pub(crate) tables: BTreeMap<SqlObjectName, Arc<dyn TableProvider>>,
     pub(crate) source: RegisteredSource,
 }
 
-pub(crate) struct BackendCatalogRegistration {
-    pub(crate) catalog: Arc<dyn CatalogProvider>,
+pub(crate) struct DiscoveredCatalogDraft {
+    pub(crate) target: CatalogTarget,
+    pub(crate) provider: Arc<dyn CatalogProvider>,
     pub(crate) source: RegisteredSource,
-    pub(crate) column_fetcher: Arc<dyn DatabaseColumnFetcher>,
+    pub(crate) column_fetcher: Option<Arc<dyn DatabaseColumnFetcher>>,
+}
+
+pub(crate) struct CatalogRegistration {
+    pub(crate) catalog_name: SqlIdentifier,
+    pub(crate) publication: CatalogPublication,
+    pub(crate) provider: Arc<dyn CatalogProvider>,
+    pub(crate) source: RegisteredSource,
+    pub(crate) column_fetcher: Option<Arc<dyn DatabaseColumnFetcher>>,
 }
 
 /// Row-set restriction for one lazy database column-metadata fetch.
@@ -267,25 +309,14 @@ impl BackendRegistrationContext {
 }
 
 #[async_trait]
-pub(crate) trait CompiledBackendSource: Send + Sync {
-    /// Runtime qualified name: the SQL schema for two-part sources, the SQL
-    /// catalog for catalog-backed sources.
-    fn qualified_name(&self) -> SourceQualifiedName;
-
-    fn source_name(&self) -> &str;
-
-    fn validate_runtime_capabilities(&self) -> datafusion::error::Result<()>;
-
-    /// Register this compiled source into a `DataFusion` session.
-    ///
-    /// The registration context is batch-scoped and backend-agnostic. Backends
-    /// should use it only for resources that are safe to share across sources in
-    /// the same registration pass.
-    async fn register(
+pub(crate) trait CompiledBackendCatalog: Send + Sync {
+    /// Stages this compiled catalog without mutating the active session.
+    async fn stage(
         &self,
         ctx: &SessionContext,
         registration: &BackendRegistrationContext,
-    ) -> datafusion::error::Result<BackendRegistration>;
+        preparation: &mut crate::backends::CatalogPreparation<'_>,
+    ) -> Result<(), crate::CoreError>;
 }
 
 pub(crate) fn validate_lookup_key_filter_backend_support(
@@ -429,13 +460,13 @@ pub(crate) fn build_registered_inputs(
 }
 
 pub(crate) fn build_registered_table(
+    sql_name: SqlObjectName,
     common: &TableCommon,
     columns: Vec<RegisteredColumn>,
     required_filters: Vec<String>,
 ) -> RegisteredTable {
     RegisteredTable {
-        schema_name: None,
-        table_name: common.name.clone(),
+        sql_name,
         description: common.description.clone(),
         guide: common.guide.clone(),
         require_guide_read: common.require_guide_read,
@@ -447,7 +478,7 @@ pub(crate) fn build_registered_table(
 }
 
 pub(crate) fn build_registered_table_function(
-    schema_name: &str,
+    sql_name: SqlObjectName,
     function: &SourceTableFunctionSpec,
     factory: Arc<dyn SourceFunctionProviderFactory>,
 ) -> RegisteredTableFunction {
@@ -472,8 +503,7 @@ pub(crate) fn build_registered_table_function(
         .collect::<Vec<_>>();
 
     RegisteredTableFunction {
-        schema_name: schema_name.to_string(),
-        function_name: function.name.clone(),
+        sql_name,
         factory,
         kind: function.kind,
         description: function.description.clone(),

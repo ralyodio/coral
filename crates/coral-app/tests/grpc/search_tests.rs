@@ -53,10 +53,6 @@ impl SourceDecorator for PausingCatalogDecorator {
         "pausing_catalog_resolution"
     }
 
-    fn supports_catalog_sources(&self) -> bool {
-        true
-    }
-
     fn prepare(&mut self, _selected_sources: &[QuerySource]) -> Result<(), SourceDecoratorError> {
         let Some(pause) = self.pause.take() else {
             return Ok(());

@@ -12,7 +12,7 @@ use datafusion::logical_expr::sqlparser::ast::{
     TableFunctionArgs,
 };
 
-use crate::backends::RegisteredTableFunction;
+use coral_spec::SqlObjectName;
 
 pub(crate) trait ScopedTableFunctionSignature {
     fn display_name(&self) -> &str;
@@ -30,42 +30,21 @@ pub(crate) trait ScopedTableFunctionSignature {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct ScopedTableFunctionName {
-    pub(crate) schema: String,
-    pub(crate) function: String,
-}
-
-impl ScopedTableFunctionName {
-    pub(crate) fn from_parts(schema: &str, function: &str) -> Self {
-        Self {
-            schema: normalize_runtime_identifier(schema),
-            function: normalize_runtime_identifier(function),
-        }
-    }
-
-    pub(crate) fn from_manifest(function: &RegisteredTableFunction) -> Self {
-        Self {
-            schema: function.schema_name.clone(),
-            function: function.function_name.clone(),
-        }
-    }
-
-    fn from_sql(schema: Ident, function: Ident, context: &dyn RelationPlannerContext) -> Self {
-        Self {
-            schema: context.normalize_ident(schema),
-            function: context.normalize_ident(function),
-        }
-    }
-}
-
 fn normalize_runtime_identifier(identifier: &str) -> String {
     identifier.to_ascii_lowercase()
 }
 
+pub(crate) fn default_catalog_function_name(schema: &str, function: &str) -> SqlObjectName {
+    SqlObjectName::new(
+        crate::runtime::DATAFUSION_DEFAULT_CATALOG,
+        normalize_runtime_identifier(schema),
+        normalize_runtime_identifier(function),
+    )
+}
+
 #[derive(Debug)]
 pub(crate) struct ScopedTableFunctionCall {
-    pub(crate) lookup_key: ScopedTableFunctionName,
+    pub(crate) lookup_key: SqlObjectName,
     pub(crate) display_name: String,
 }
 
@@ -83,16 +62,33 @@ impl ScopedTableFunctionCall {
             return None;
         };
 
-        // Coral function surfaces are exactly `schema.function(...)`. Longer
-        // names belong to DataFusion's normal relation/function planner.
-        let [schema, function] = name.0.as_slice() else {
-            return None;
+        let (catalog, schema, function, display_name) = match name.0.as_slice() {
+            [schema, function] => {
+                let schema = schema.as_ident()?.clone();
+                let function = function.as_ident()?.clone();
+                let display_name = qualified_name(&schema.value, &function.value);
+                (
+                    crate::runtime::DATAFUSION_DEFAULT_CATALOG.to_string(),
+                    context.normalize_ident(schema),
+                    context.normalize_ident(function),
+                    display_name,
+                )
+            }
+            [catalog, schema, function] => {
+                let catalog = catalog.as_ident()?.clone();
+                let schema = schema.as_ident()?.clone();
+                let function = function.as_ident()?.clone();
+                let display_name = format!("{}.{}.{}", catalog.value, schema.value, function.value);
+                (
+                    context.normalize_ident(catalog),
+                    context.normalize_ident(schema),
+                    context.normalize_ident(function),
+                    display_name,
+                )
+            }
+            _ => return None,
         };
-
-        let schema = schema.as_ident()?.clone();
-        let function = function.as_ident()?.clone();
-        let display_name = qualified_name(&schema.value, &function.value);
-        let lookup_key = ScopedTableFunctionName::from_sql(schema, function, context);
+        let lookup_key = SqlObjectName::new(catalog, schema, function);
 
         Some(Self {
             lookup_key,
@@ -123,12 +119,15 @@ pub(crate) fn qualified_name(schema: &str, function: &str) -> String {
 }
 
 pub(crate) fn available_functions_hint<'a>(
+    catalog: &str,
     schema: &str,
-    functions: impl IntoIterator<Item = (&'a ScopedTableFunctionName, &'a str)>,
+    functions: impl IntoIterator<Item = (&'a SqlObjectName, &'a str)>,
 ) -> String {
     let mut names: Vec<&str> = functions
         .into_iter()
-        .filter_map(|(key, display_name)| (key.schema == schema).then_some(display_name))
+        .filter_map(|(key, display_name)| {
+            (key.catalog_name() == catalog && key.schema_name() == schema).then_some(display_name)
+        })
         .collect();
     names.sort_unstable();
 
