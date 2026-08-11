@@ -74,13 +74,27 @@ export function Sidebar({
     { icon: 'Activity', label: 'Traces', paths: [tracesPath], to: tracesPath },
   ] satisfies NavItem[]
   const settingsPath = routePath('settings')
+  const mcpClientsPath = routePath('settingsMcpClients')
+  const runtimeFeaturesPath = routePath('settingsRuntimeFeatures')
   const isSettingsRoute = Boolean(useMatch({ end: false, path: settingsPath }))
-  // MCP client configuration exists only in the Desktop shell. The section index
-  // redirects to it, so the link stays on the section root and follows wherever
-  // the landing page moves.
-  const settingsNavItems: NavItem[] = desktop
-    ? [{ icon: 'Settings', label: 'MCP Clients', paths: [settingsPath], to: settingsPath }]
+  // MCP client configuration exists only in the Desktop shell. Runtime features
+  // are Coral config, so they are reachable from every build.
+  //
+  // The section index redirects to MCP Clients on Desktop, so that link stays on
+  // the section root and follows wherever the landing page moves. It still
+  // highlights on its own path: `/settings` matches every page below it.
+  const mcpClientsNavItems: NavItem[] = desktop
+    ? [{ icon: 'Settings', label: 'MCP Clients', paths: [mcpClientsPath], to: settingsPath }]
     : []
+  const settingsNavItems: NavItem[] = [
+    ...mcpClientsNavItems,
+    {
+      icon: 'Flag',
+      label: 'Features',
+      paths: [runtimeFeaturesPath],
+      to: runtimeFeaturesPath,
+    },
+  ]
   const navItems = isSettingsRoute ? settingsNavItems : workspaceNavItems
   const settingsHomeButton = (
     <ButtonContainer ariaLabel="Home" as={Link} size="22" to={routePath('home')} variant="bare">
