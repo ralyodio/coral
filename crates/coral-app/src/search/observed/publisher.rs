@@ -98,21 +98,7 @@ impl SearchObservationHandle {
                 source.runtime_contract_fingerprint,
                 source.credential_revision,
             );
-            // Fail this source closed without touching the others: the arm
-            // above aborts capture for every selected source, which a single
-            // source's incoherent identity must not do.
-            let source_scopes = match source_surface_scopes(source.query_source, seed) {
-                Ok(source_scopes) => source_scopes,
-                Err(error) => {
-                    tracing::warn!(
-                        workspace = %workspace_name.as_str(),
-                        source = %source.query_source.source_name(),
-                        error = %error,
-                        "skipping observed-values capture for a source whose runtime component identity diverges"
-                    );
-                    continue;
-                }
-            };
+            let source_scopes = source_surface_scopes(source.query_source, seed);
             for scope in source_scopes {
                 scopes.insert(scope.key(), RegisteredSurface { scope, epoch });
             }
@@ -194,18 +180,14 @@ impl SourceObservationPublisher for SourceScanObservedValuesPublisher {
 impl SourceScanObservedValuesPublisher {
     fn publish(&self, observation: SourceScanObservation<'_>) {
         let surface_kind = observed_surface_kind(observation.surface_kind);
-        let source_name = observation.sql_name.schema_name();
-        let surface_name = observation.sql_name.name();
         let key = SurfaceKey {
-            source_name: source_name.to_string(),
+            sql_name: observation.sql_name.clone(),
             surface_kind,
-            surface_name: surface_name.to_string(),
         };
         let Some(registered) = self.scopes.get(&key) else {
             tracing::debug!(
                 workspace = %self.workspace_name.as_str(),
-                source = %source_name,
-                surface = %surface_name,
+                sql_name = %observation.sql_name,
                 "observed-values source-scan observation did not match a known source surface"
             );
             return;
@@ -218,7 +200,7 @@ impl SourceScanObservedValuesPublisher {
                 tracing::debug!(
                     workspace = %self.workspace_name.as_str(),
                     source = %scope.source_name,
-                    surface = %surface_name,
+                    sql_name = %observation.sql_name,
                     "dropping observed-values source-scan observation because writer queue is full"
                 );
                 return;
@@ -227,7 +209,7 @@ impl SourceScanObservedValuesPublisher {
                 tracing::debug!(
                     workspace = %self.workspace_name.as_str(),
                     source = %scope.source_name,
-                    surface = %surface_name,
+                    sql_name = %observation.sql_name,
                     "dropping observed-values source-scan observation because writer is stopped"
                 );
                 return;
@@ -246,8 +228,7 @@ impl SourceScanObservedValuesPublisher {
             Ok(None) => {
                 tracing::debug!(
                     workspace = %self.workspace_name.as_str(),
-                    source = %scope.source_name,
-                    surface = %surface_name,
+                    sql_name = %observation.sql_name,
                     "dropping observed-values source-scan observation because no candidate fits the serialized job budget"
                 );
                 return;
@@ -255,8 +236,7 @@ impl SourceScanObservedValuesPublisher {
             Err(error) => {
                 tracing::debug!(
                     workspace = %self.workspace_name.as_str(),
-                    source = %scope.source_name,
-                    surface = %surface_name,
+                    sql_name = %observation.sql_name,
                     error = %error,
                     "failed to serialize observed-values source-scan observation"
                 );
@@ -268,7 +248,7 @@ impl SourceScanObservedValuesPublisher {
             source_name: scope.source_name.clone(),
             source_scope_id: scope.source_scope_id.clone(),
             surface_kind,
-            surface_name: surface_name.to_string(),
+            surface_name: observation.sql_name.name().to_string(),
             payload_json,
             epoch: registered.epoch,
         });
@@ -293,7 +273,7 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use coral_engine::{
-        HttpRuntimeBackend, HttpRuntimeCatalog, HttpRuntimeRelation, QuerySource,
+        HttpRuntimeBackend, HttpRuntimeCatalog, HttpRuntimeRelation, QuerySource, RuntimeCatalog,
         RuntimeSourcePackage, SourceObservationSurfaceKind, SourceScanObservation,
     };
     use coral_spec::{DO_NOT_INDEX_COLUMN_METADATA_KEY, SqlObjectName, parse_source_manifest_yaml};
@@ -316,11 +296,9 @@ mod tests {
         let source = http_query_source("/issues");
 
         let first_scope = source_surface_scopes(&source, SourceScopeSeed::PRE_ACTIVATION)
-            .expect("coherent source identity")
             .pop()
             .expect("first scope");
         let second_scope = source_surface_scopes(&source, SourceScopeSeed::PRE_ACTIVATION)
-            .expect("coherent source identity")
             .pop()
             .expect("second scope");
 
@@ -334,21 +312,18 @@ mod tests {
             &source,
             SourceScopeSeed::new("runtime-contract-a", Uuid::from_u128(1)),
         )
-        .expect("coherent source identity")
         .pop()
         .expect("first scope");
         let contract_changed = source_surface_scopes(
             &source,
             SourceScopeSeed::new("runtime-contract-b", Uuid::from_u128(1)),
         )
-        .expect("coherent source identity")
         .pop()
         .expect("contract scope");
         let credential_changed = source_surface_scopes(
             &source,
             SourceScopeSeed::new("runtime-contract-a", Uuid::from_u128(2)),
         )
-        .expect("coherent source identity")
         .pop()
         .expect("credential scope");
 
@@ -394,9 +369,8 @@ mod tests {
         )
         .expect("batch");
 
-        let sql_name = SqlObjectName::new("datafusion", "github", "issues");
         publisher.publish_source_scan(SourceScanObservation {
-            sql_name: &sql_name,
+            sql_name: &coral_spec::SqlObjectName::new("datafusion", "github", "issues"),
             surface_kind: SourceObservationSurfaceKind::Table,
             batch: &batch,
         });
@@ -441,9 +415,8 @@ mod tests {
         )
         .expect("batch");
 
-        let sql_name = SqlObjectName::new("datafusion", "github", "issues");
         publisher.publish_source_scan(SourceScanObservation {
-            sql_name: &sql_name,
+            sql_name: &coral_spec::SqlObjectName::new("datafusion", "github", "issues"),
             surface_kind: SourceObservationSurfaceKind::Table,
             batch: &batch,
         });
@@ -454,56 +427,59 @@ mod tests {
     }
 
     #[test]
-    fn divergent_component_identity_is_skipped_without_affecting_other_sources() {
+    fn one_source_can_capture_distinct_runtime_sql_names() {
         let temp = tempdir().expect("tempdir");
         let layout =
             AppStateLayout::discover(Some(temp.path().join("coral-config"))).expect("layout");
         let workspace = WorkspaceName::default();
         let handle = SearchObservationHandle::new(layout.clone());
         let divergent = divergent_component_query_source();
-        let coherent = single_component_query_source("github_mcp_v4");
-        let extensions = handle.extensions_for(
-            &workspace,
-            &[
-                SearchObservationSource::for_test(&divergent),
-                SearchObservationSource::for_test(&coherent),
-            ],
-        );
+        let extensions =
+            handle.extensions_for(&workspace, &[SearchObservationSource::for_test(&divergent)]);
         let publisher = extensions
             .source_observation_publishers
             .first()
             .expect("publisher");
         let batch = title_batch();
 
-        for source_name in ["github_v4_rest", "github_v4_mcp", "github_mcp_v4"] {
-            let sql_name = SqlObjectName::new("datafusion", source_name, "list_issues");
+        let mut identities = Vec::new();
+        for (index, schema_name) in ["github_v4_rest", "github_v4_mcp"].into_iter().enumerate() {
             publisher.publish_source_scan(SourceScanObservation {
-                sql_name: &sql_name,
+                sql_name: &coral_spec::SqlObjectName::new("datafusion", schema_name, "list_issues"),
                 surface_kind: SourceObservationSurfaceKind::Table,
                 batch: &batch,
             });
+            identities = wait_for_source_identities(&layout, &workspace, index + 1);
         }
 
-        // Only the coherent source registered a surface, so only its
-        // observation is captured; the divergent package writes nothing.
-        let identities = wait_for_source_identities(&layout, &workspace, 1);
         assert_eq!(
             identities,
-            [("github_mcp_v4".to_string(), "list_issues".to_string())]
+            [
+                ("github_v4".to_string(), "list_issues".to_string()),
+                ("github_v4".to_string(), "list_issues".to_string()),
+            ]
         );
     }
 
     #[test]
-    fn divergent_component_identity_fails_scope_derivation() {
+    fn source_owned_scopes_keep_distinct_sql_names() {
         let source = divergent_component_query_source();
 
-        let error = source_surface_scopes(&source, SourceScopeSeed::PRE_ACTIVATION)
-            .expect_err("divergent component identity must not derive scopes");
+        let scopes = source_surface_scopes(&source, SourceScopeSeed::PRE_ACTIVATION);
 
-        // This is what makes retrieval fail closed: the live-scope loader turns
-        // this error into a per-source load failure.
-        assert!(error.to_string().contains("github_v4"));
-        assert!(error.to_string().contains("github_v4_rest"));
+        assert_eq!(scopes.len(), 2);
+        assert!(scopes.iter().all(|scope| scope.source_name == "github_v4"));
+        let sql_names = scopes
+            .iter()
+            .map(|scope| scope.key().sql_name.to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            sql_names,
+            std::collections::BTreeSet::from([
+                "datafusion.github_v4_mcp.list_issues".to_string(),
+                "datafusion.github_v4_rest.list_issues".to_string(),
+            ])
+        );
     }
 
     #[test]
@@ -579,9 +555,8 @@ mod tests {
         )
         .expect("batch");
 
-        let sql_name = SqlObjectName::new("datafusion", "github", "issues");
         publisher.publish_source_scan(SourceScanObservation {
-            sql_name: &sql_name,
+            sql_name: &coral_spec::SqlObjectName::new("datafusion", "github", "issues"),
             surface_kind: SourceObservationSurfaceKind::Table,
             batch: &batch,
         });
@@ -691,51 +666,62 @@ tables:
         )
     }
 
-    /// Synthetic package in the pre-#1791 shape: components named differently
-    /// from the package that carries them. Unreachable through the sources
-    /// domain, which is exactly what the tripwire defends against.
+    /// Package whose runtime catalog contains two distinct SQL schemas.
     fn divergent_component_query_source() -> QuerySource {
-        runtime_catalog_query_source("github_v4", &["github_v4_rest", "github_v4_mcp"])
-    }
-
-    fn single_component_query_source(source_name: &str) -> QuerySource {
-        runtime_catalog_query_source(source_name, &[source_name])
-    }
-
-    fn runtime_catalog_query_source(source_name: &str, schemas: &[&str]) -> QuerySource {
-        let manifests = schemas
-            .iter()
-            .map(|schema| http_manifest(schema))
-            .collect::<Vec<_>>();
-        let backend = HttpRuntimeBackend::from_manifest(
-            manifests.first().expect("at least one HTTP manifest"),
-        );
-        let relations = manifests
-            .into_iter()
-            .flat_map(|manifest| {
-                let schema_name = manifest.common.name.clone();
-                manifest.tables.into_iter().map(move |table| {
-                    let sql_name = SqlObjectName::new("datafusion", &schema_name, table.name());
-                    HttpRuntimeRelation::try_table(sql_name, table).expect("HTTP relation")
-                })
-            })
-            .collect();
-        let catalog =
-            HttpRuntimeCatalog::try_new("datafusion", backend, relations).expect("HTTP catalog");
         QuerySource::from_runtime_catalog(
             RuntimeSourcePackage {
-                source_name: source_name.to_string(),
+                source_name: "github_v4".to_string(),
                 authored_version: None,
                 description: String::new(),
                 declared_inputs: Vec::new(),
                 test_queries: Vec::new(),
                 identity_requirements: None,
-                catalog: Some(catalog.into()),
+                catalog: Some(divergent_http_catalog()),
             },
             BTreeMap::new(),
             BTreeMap::new(),
         )
-        .expect("runtime catalog query source")
+        .expect("divergent component query source")
+    }
+
+    fn divergent_http_catalog() -> RuntimeCatalog {
+        let manifest = parse_source_manifest_yaml(
+            r"
+dsl_version: 3
+name: github_v4
+version: 0.1.0
+backend: http
+base_url: https://api.github.com
+tables:
+  - name: list_issues
+    description: Issues
+    request:
+      path: /issues
+    columns:
+      - name: title
+        type: Utf8
+",
+        )
+        .expect("component manifest");
+        let manifest = manifest.as_http().expect("HTTP component");
+        let table = manifest.tables.first().expect("one table").clone();
+        let relations = ["github_v4_rest", "github_v4_mcp"]
+            .into_iter()
+            .map(|schema_name| {
+                HttpRuntimeRelation::try_table(
+                    SqlObjectName::new("datafusion", schema_name, "list_issues"),
+                    table.clone(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("runtime relations");
+        HttpRuntimeCatalog::try_new(
+            "datafusion",
+            HttpRuntimeBackend::from_manifest(manifest),
+            relations,
+        )
+        .expect("HTTP runtime catalog")
+        .into()
     }
 
     fn title_batch() -> RecordBatch {
@@ -748,28 +734,6 @@ tables:
             vec![Arc::new(StringArray::from(vec!["Fix the bug"]))],
         )
         .expect("batch")
-    }
-
-    fn http_manifest(source_name: &str) -> coral_spec::backends::http::HttpSourceManifest {
-        let yaml = format!(
-            r"
-dsl_version: 3
-name: {source_name}
-version: 0.1.0
-backend: http
-base_url: https://api.github.com
-tables:
-  - name: list_issues
-    description: Issues
-    request:
-      path: /issues
-    columns:
-      - name: title
-        type: Utf8
-"
-        );
-        let manifest = parse_source_manifest_yaml(&yaml).expect("component manifest");
-        manifest.as_http().expect("HTTP source").clone()
     }
 
     fn wait_for_payloads(layout: &AppStateLayout, workspace: &WorkspaceName) -> Vec<String> {
@@ -790,8 +754,9 @@ tables:
         expected_count: usize,
     ) -> Vec<(String, String)> {
         let store = SqliteObservedValuesStore::new(layout.clone());
+        let mut identities = Vec::new();
         for _ in 0..100 {
-            let identities = store
+            identities = store
                 .queue_source_identities(workspace)
                 .expect("queue source identities");
             if identities.len() == expected_count {
@@ -799,7 +764,9 @@ tables:
             }
             thread::sleep(Duration::from_millis(10));
         }
-        panic!("observed-values writer did not enqueue expected source identities");
+        panic!(
+            "observed-values writer did not enqueue {expected_count} source identities; got {identities:?}"
+        );
     }
 
     fn observed_candidate(display_value: &str) -> ObservedValueCandidate {

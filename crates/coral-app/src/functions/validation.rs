@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, HashSet};
 
-use coral_engine::{QuerySource, RuntimeCatalog, StaticRuntimeCatalog, UdfRuntimeDefinition};
+use coral_engine::{QuerySource, RuntimeCatalog, UdfRuntimeDefinition, normalize_catalog_name};
+use coral_spec::SqlObjectName;
 
 use crate::bootstrap::AppError;
 
@@ -14,7 +15,7 @@ pub(crate) fn record_sql_publish_target(
     function: &UdfRuntimeDefinition,
     publish_targets: &mut SqlPublishTargets,
 ) -> Result<(), AppError> {
-    let target = SqlPublishTarget::new(
+    let target = SqlPublishTarget::in_default_catalog(
         &function.publish.table_function.schema,
         &function.publish.table_function.name,
     );
@@ -67,52 +68,44 @@ fn record_source_catalog_sql_targets(
     schemas: Option<&BTreeSet<String>>,
     targets: &mut SqlPublishTargets,
 ) {
-    let mut record = |schema: &str, name: &str| {
-        if schemas.is_none_or(|schemas| schemas.contains(schema)) {
-            targets.insert(SqlPublishTarget::new(schema, name));
+    let mut record = |sql_name: &SqlObjectName| {
+        if schemas.is_none_or(|schemas| schemas.contains(sql_name.schema_name())) {
+            targets.insert(SqlPublishTarget::from_sql_name(sql_name));
         }
     };
-    match catalog {
-        RuntimeCatalog::Discovered(_) => {
-            // Database tables are discovered at registration and have no static publish targets.
-        }
-        RuntimeCatalog::Static(StaticRuntimeCatalog::Http(catalog)) => {
-            for relation in catalog.relations() {
-                let sql_name = relation.sql_name();
-                record(sql_name.schema_name(), sql_name.name());
-            }
-        }
-        RuntimeCatalog::Static(StaticRuntimeCatalog::File(catalog)) => {
-            for relation in catalog.relations() {
-                let sql_name = relation.sql_name();
-                record(sql_name.schema_name(), sql_name.name());
-            }
-        }
-        RuntimeCatalog::Static(StaticRuntimeCatalog::Mcp(catalog)) => {
-            for relation in catalog.relations() {
-                let sql_name = relation.sql_name();
-                record(sql_name.schema_name(), sql_name.name());
-            }
-        }
-    }
+    catalog.for_each_declared_relation(|sql_name, _kind| record(sql_name));
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct SqlPublishTarget {
+    catalog: Option<String>,
     schema: String,
     name: String,
 }
 
 impl SqlPublishTarget {
-    fn new(schema: &str, name: &str) -> Self {
+    fn in_default_catalog(schema: &str, name: &str) -> Self {
         Self {
+            catalog: None,
             schema: schema.to_ascii_lowercase(),
             name: name.to_ascii_lowercase(),
         }
     }
 
+    fn from_sql_name(sql_name: &SqlObjectName) -> Self {
+        Self {
+            catalog: normalize_catalog_name(Some(sql_name.catalog_name()))
+                .map(str::to_ascii_lowercase),
+            schema: sql_name.schema_name().to_ascii_lowercase(),
+            name: sql_name.name().to_ascii_lowercase(),
+        }
+    }
+
     fn display_name(&self) -> String {
-        format!("{}.{}", self.schema, self.name)
+        match &self.catalog {
+            Some(catalog) => format!("{catalog}.{}.{}", self.schema, self.name),
+            None => format!("{}.{}", self.schema, self.name),
+        }
     }
 }
 
@@ -121,7 +114,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use coral_engine::{
-        UdfRuntimeImplementation, UdfRuntimePublish, UdfRuntimeTableFunctionPublish,
+        HttpRuntimeBackend, HttpRuntimeCatalog, HttpRuntimeRelation, UdfRuntimeImplementation,
+        UdfRuntimePublish, UdfRuntimeTableFunctionPublish,
     };
     use coral_spec::parse_source_manifest_yaml;
 
@@ -129,6 +123,45 @@ mod tests {
 
     fn functions_source() -> QuerySource {
         http_source("functions", "review_queue")
+    }
+
+    fn v4_issues_catalog() -> RuntimeCatalog {
+        let mut manifest = parse_source_manifest_yaml(
+            r"
+name: github_v4
+version: 0.1.0
+dsl_version: 3
+backend: http
+base_url: https://example.com
+tables:
+  - name: list
+    description: Existing table
+    request:
+      method: GET
+      path: /issues
+    response: {}
+    columns:
+      - name: id
+        type: Int64
+",
+        )
+        .expect("source manifest")
+        .as_http()
+        .expect("HTTP source")
+        .clone();
+        manifest.common.dsl_version = 4;
+        let relation = HttpRuntimeRelation::try_table(
+            SqlObjectName::new("github_v4", "issues", "list"),
+            manifest.tables.first().expect("issues table").clone(),
+        )
+        .expect("runtime relation");
+        HttpRuntimeCatalog::try_new(
+            "github_v4",
+            HttpRuntimeBackend::from_manifest(&manifest),
+            vec![relation],
+        )
+        .expect("runtime catalog")
+        .into()
     }
 
     fn http_source(schema: &str, table: &str) -> QuerySource {
@@ -180,7 +213,22 @@ tables:
     fn functions_schema_still_checks_source_publish_targets() {
         let targets = initial_sql_publish_targets(&[functions_source()]);
 
-        assert!(targets.contains(&SqlPublishTarget::new("functions", "review_queue")));
+        assert!(targets.contains(&SqlPublishTarget::in_default_catalog(
+            "functions",
+            "review_queue"
+        )));
+    }
+
+    #[test]
+    fn v4_source_target_does_not_collide_with_default_catalog_udf() {
+        let mut targets = HashSet::new();
+        record_source_catalog_sql_targets(&v4_issues_catalog(), None, &mut targets);
+        let mut function = runtime_function();
+        function.publish.table_function.schema = "issues".to_string();
+        function.publish.table_function.name = "list".to_string();
+
+        record_sql_publish_target(&function, &mut targets)
+            .expect("different catalogs must not collide");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Source-surface routing and opaque scope derivation for observed values.
 
 use coral_engine::{QuerySource, RuntimeRelationKind};
+use coral_spec::SqlObjectName;
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -8,32 +9,15 @@ use crate::hash::sha256_hex;
 use crate::search::observed::ObservedValuesLiveScope;
 use crate::search::observed::sqlite_queue::ObservedValuesSurfaceKind;
 
-const SOURCE_SCOPE_FORMAT_VERSION: u8 = 1;
+const LEGACY_SOURCE_SCOPE_FORMAT_VERSION: u8 = 1;
+const CATALOG_SOURCE_SCOPE_FORMAT_VERSION: u8 = 2;
 #[cfg(test)]
 const PRE_ACTIVATION_RUNTIME_CONTRACT_FINGERPRINT: &str = "observed-values/pre-activation/v0";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct SurfaceKey {
-    pub(super) source_name: String,
+    pub(super) sql_name: SqlObjectName,
     pub(super) surface_kind: ObservedValuesSurfaceKind,
-    pub(super) surface_name: String,
-}
-
-/// A runtime component whose name diverges from its package's source name.
-///
-/// Since #1791 one source publishes exactly one surface and one SQL namespace,
-/// and the sources domain copies both names from the same `manifest.common.name`
-/// field, so this is unreachable on every production path. Search still refuses
-/// the source here rather than writing rows under an identity that would select
-/// nothing back — a tripwire at the single seam that derives identity from a
-/// runtime package, not an enforcement boundary.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "source '{source_name}' exposes runtime component '{component_source_name}'; one installed source must publish exactly one runtime schema"
-)]
-pub(crate) struct ObservedSourceIdentityMismatch {
-    source_name: String,
-    component_source_name: String,
 }
 
 /// Opaque identity supplied by the app-owned runtime-package boundary.
@@ -67,8 +51,7 @@ impl<'a> SourceScopeSeed<'a> {
 
 #[derive(Debug, Clone)]
 pub(super) struct ObservedSourceSurfaceScope {
-    /// Installed source: lifecycle clears, invalidation epochs, and the SQL
-    /// namespace used in search results — one name, because they are one thing.
+    /// Installed source that owns lifecycle clears and invalidation epochs.
     pub(super) source_name: String,
     surface_key: SurfaceKey,
     pub(super) source_scope_id: String,
@@ -82,9 +65,14 @@ impl ObservedSourceSurfaceScope {
     pub(super) fn live_scope(&self) -> ObservedValuesLiveScope {
         ObservedValuesLiveScope {
             source_name: self.source_name.clone(),
+            catalog_name: coral_engine::normalize_catalog_name(Some(
+                self.surface_key.sql_name.catalog_name(),
+            ))
+            .map(ToString::to_string),
+            schema_name: self.surface_key.sql_name.schema_name().to_string(),
             source_scope_id: self.source_scope_id.clone(),
             surface_kind: self.surface_key.surface_kind,
-            surface_name: self.surface_key.surface_name.clone(),
+            surface_name: self.surface_key.sql_name.name().to_string(),
         }
     }
 }
@@ -92,100 +80,119 @@ impl ObservedSourceSurfaceScope {
 pub(super) fn source_surface_scopes(
     source: &QuerySource,
     seed: SourceScopeSeed<'_>,
-) -> Result<Vec<ObservedSourceSurfaceScope>, ObservedSourceIdentityMismatch> {
-    let source_name = source.source_name();
+) -> Vec<ObservedSourceSurfaceScope> {
     let mut scopes = Vec::new();
-    let mut mismatch = None;
     if let Some(catalog) = source.catalog() {
         catalog.for_each_declared_relation(|sql_name, kind| {
-            if mismatch.is_some() {
-                return;
-            }
-            if sql_name.schema_name() != source_name {
-                mismatch = Some(ObservedSourceIdentityMismatch {
-                    source_name: source_name.to_string(),
-                    component_source_name: sql_name.schema_name().to_string(),
-                });
-                return;
-            }
-            scopes.push(surface_scope(
-                source_name,
-                if kind == RuntimeRelationKind::TableFunction {
-                    ObservedValuesSurfaceKind::Function
-                } else {
-                    ObservedValuesSurfaceKind::Table
-                },
-                sql_name.name(),
-                seed,
-            ));
+            push_surface_scope(source, sql_name, kind, seed, &mut scopes);
         });
     }
-    if let Some(mismatch) = mismatch {
-        return Err(mismatch);
-    }
-    Ok(scopes)
+    scopes
+}
+
+fn push_surface_scope(
+    source: &QuerySource,
+    sql_name: &coral_spec::SqlObjectName,
+    kind: RuntimeRelationKind,
+    seed: SourceScopeSeed<'_>,
+    scopes: &mut Vec<ObservedSourceSurfaceScope>,
+) {
+    scopes.push(surface_scope(
+        source,
+        sql_name,
+        if kind == RuntimeRelationKind::TableFunction {
+            ObservedValuesSurfaceKind::Function
+        } else {
+            ObservedValuesSurfaceKind::Table
+        },
+        seed,
+    ));
 }
 
 fn surface_scope(
-    source_name: &str,
+    source: &QuerySource,
+    sql_name: &SqlObjectName,
     surface_kind: ObservedValuesSurfaceKind,
-    surface_name: &str,
     seed: SourceScopeSeed<'_>,
 ) -> ObservedSourceSurfaceScope {
-    let scope_bytes = serde_json::to_vec(&ScopeFingerprint {
-        format_version: SOURCE_SCOPE_FORMAT_VERSION,
-        runtime_contract_fingerprint: seed.runtime_contract_fingerprint,
-        credential_revision: seed.credential_revision,
-        source_name,
-        surface_kind: surface_kind.as_str(),
-        surface_name,
-    })
-    .expect("observed-values source scope must serialize");
+    let scope_bytes = scope_fingerprint_bytes(sql_name, surface_kind, seed);
     ObservedSourceSurfaceScope {
-        source_name: source_name.to_string(),
+        source_name: source.source_name().to_string(),
         surface_key: SurfaceKey {
-            source_name: source_name.to_string(),
+            sql_name: sql_name.clone(),
             surface_kind,
-            surface_name: surface_name.to_string(),
         },
         source_scope_id: sha256_hex(&scope_bytes),
     }
 }
 
+fn scope_fingerprint_bytes(
+    sql_name: &SqlObjectName,
+    surface_kind: ObservedValuesSurfaceKind,
+    seed: SourceScopeSeed<'_>,
+) -> Vec<u8> {
+    if coral_engine::normalize_catalog_name(Some(sql_name.catalog_name())).is_none() {
+        serde_json::to_vec(&LegacyScopeFingerprint {
+            format_version: LEGACY_SOURCE_SCOPE_FORMAT_VERSION,
+            runtime_contract_fingerprint: seed.runtime_contract_fingerprint,
+            credential_revision: seed.credential_revision,
+            component_source_name: sql_name.schema_name(),
+            surface_kind: surface_kind.as_str(),
+            surface_name: sql_name.name(),
+        })
+    } else {
+        serde_json::to_vec(&CatalogScopeFingerprint {
+            format_version: CATALOG_SOURCE_SCOPE_FORMAT_VERSION,
+            runtime_contract_fingerprint: seed.runtime_contract_fingerprint,
+            credential_revision: seed.credential_revision,
+            catalog_name: sql_name.catalog_name(),
+            schema_name: sql_name.schema_name(),
+            surface_kind: surface_kind.as_str(),
+            surface_name: sql_name.name(),
+        })
+    }
+    .expect("observed-values source scope must serialize")
+}
+
 #[derive(Serialize)]
-struct ScopeFingerprint<'a> {
+struct LegacyScopeFingerprint<'a> {
     format_version: u8,
     runtime_contract_fingerprint: &'a str,
     credential_revision: Uuid,
-    // The serialized key is a stable on-disk format: these bytes are hashed
-    // into `source_scope_id`, which every stored observed row is keyed by.
-    // Renaming the Rust field to match the singular identity model must not
-    // rotate scope ids, or migrated rows would be fail-closed invisible.
-    #[serde(rename = "component_source_name")]
-    source_name: &'a str,
+    component_source_name: &'a str,
+    surface_kind: &'static str,
+    surface_name: &'a str,
+}
+
+#[derive(Serialize)]
+struct CatalogScopeFingerprint<'a> {
+    format_version: u8,
+    runtime_contract_fingerprint: &'a str,
+    credential_revision: Uuid,
+    catalog_name: &'a str,
+    schema_name: &'a str,
     surface_kind: &'static str,
     surface_name: &'a str,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{SOURCE_SCOPE_FORMAT_VERSION, ScopeFingerprint};
-    use crate::hash::sha256_hex;
+    use coral_spec::SqlObjectName;
     use uuid::Uuid;
+
+    use super::{SourceScopeSeed, scope_fingerprint_bytes};
+    use crate::hash::sha256_hex;
+    use crate::search::observed::sqlite_queue::ObservedValuesSurfaceKind;
 
     /// Pins the hashed bytes across the `component_source_name` -> `source_name`
     /// Rust rename. A change here invalidates every stored observed row.
     #[test]
-    fn scope_fingerprint_hash_is_stable_across_the_field_rename() {
-        let scope_bytes = serde_json::to_vec(&ScopeFingerprint {
-            format_version: SOURCE_SCOPE_FORMAT_VERSION,
-            runtime_contract_fingerprint: "v1:test-runtime-contract",
-            credential_revision: Uuid::nil(),
-            source_name: "github_v4",
-            surface_kind: "table",
-            surface_name: "issues",
-        })
-        .expect("scope fingerprint serializes");
+    fn legacy_scope_fingerprint_hash_is_stable() {
+        let scope_bytes = scope_fingerprint_bytes(
+            &SqlObjectName::new("datafusion", "github_v4", "issues"),
+            ObservedValuesSurfaceKind::Table,
+            SourceScopeSeed::new("v1:test-runtime-contract", Uuid::nil()),
+        );
 
         assert_eq!(
             String::from_utf8(scope_bytes.clone()).expect("scope fingerprint is utf-8"),
@@ -200,6 +207,26 @@ mod tests {
         assert_eq!(
             sha256_hex(&scope_bytes),
             "82fca0aa8c55fc4b8a22cf7a8f57a63d5acab8d7d2d84853d3f12b3b7a24886b"
+        );
+    }
+
+    #[test]
+    fn catalog_scope_fingerprint_includes_three_part_identity() {
+        let scope_bytes = scope_fingerprint_bytes(
+            &SqlObjectName::new("github_v4", "issues", "list"),
+            ObservedValuesSurfaceKind::Table,
+            SourceScopeSeed::new("v5:test-runtime-contract", Uuid::nil()),
+        );
+
+        assert_eq!(
+            String::from_utf8(scope_bytes).expect("scope fingerprint is utf-8"),
+            concat!(
+                r#"{"format_version":2,"#,
+                r#""runtime_contract_fingerprint":"v5:test-runtime-contract","#,
+                r#""credential_revision":"00000000-0000-0000-0000-000000000000","#,
+                r#""catalog_name":"github_v4","schema_name":"issues","#,
+                r#""surface_kind":"table","surface_name":"list"}"#,
+            )
         );
     }
 }
