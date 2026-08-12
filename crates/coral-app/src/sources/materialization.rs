@@ -201,11 +201,8 @@ impl SourceDiagnosticReporter {
             return validation.diagnostic.clone();
         }
 
-        let diagnostic = (sha256_hex(raw_bytes) != expected_sha256).then(|| {
-            materialization_warning(
-                "raw source document hash does not match",
-            )
-        });
+        let diagnostic = (sha256_hex(raw_bytes) != expected_sha256)
+            .then(|| materialization_warning("raw source document hash does not match"));
         self.raw_document_validations
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -606,9 +603,7 @@ pub(crate) fn load_v4_materialization_from_record(
                 );
             })?;
     if let Err(error) = validate_semantic_ir(manifest, &semantic_ir) {
-        load_diagnostics.push(materialization_warning(
-            error,
-        ));
+        load_diagnostics.push(materialization_warning(error));
     }
     validate_semantic_ir_structure_with_reporter(
         &semantic_ir,
@@ -899,16 +894,14 @@ fn load_optional_fingerprint_yaml(
     let fingerprint = match serde_yaml::from_str::<Fingerprint>(yaml) {
         Ok(fingerprint) => fingerprint,
         Err(error) => {
-            diagnostics.push(materialization_warning(
-                format!("could not parse optional fingerprint database artifact: {error}"),
-            ));
+            diagnostics.push(materialization_warning(format!(
+                "could not parse optional fingerprint database artifact: {error}"
+            )));
             return None;
         }
     };
     if let Err(error) = validate_fingerprint_header(manifest, &fingerprint) {
-        diagnostics.push(materialization_warning(
-            error,
-        ));
+        diagnostics.push(materialization_warning(error));
     }
     if fingerprint.manifest_sha256 != sha256_hex(manifest_yaml.as_bytes()) {
         diagnostics.push(materialization_warning(
@@ -916,9 +909,7 @@ fn load_optional_fingerprint_yaml(
         ));
     }
     if let Err(error) = validate_fingerprint_surface(manifest, &fingerprint) {
-        diagnostics.push(materialization_warning(
-            error,
-        ));
+        diagnostics.push(materialization_warning(error));
     }
     Some(fingerprint)
 }
@@ -940,9 +931,7 @@ fn load_projection_catalog_from_record(
     };
     if let Err(error) = validate_projection_catalog_header(manifest, &projections, projections_file)
     {
-        diagnostics.push(materialization_warning(
-            error,
-        ));
+        diagnostics.push(materialization_warning(error));
     }
     Ok(projections)
 }
@@ -954,9 +943,9 @@ fn load_optional_diagnostics_yaml(
     match serde_yaml::from_str(yaml) {
         Ok(persisted_diagnostics) => persisted_diagnostics,
         Err(error) => {
-            diagnostics.push(materialization_warning(
-                format!("could not parse optional diagnostics database artifact: {error}"),
-            ));
+            diagnostics.push(materialization_warning(format!(
+                "could not parse optional diagnostics database artifact: {error}"
+            )));
             Vec::new()
         }
     }
@@ -1085,9 +1074,7 @@ fn load_operation_metadata_from_record(
     }
     let metadata = parse_artifact_yaml(source_name, "operation metadata", materialized_yaml)?;
     if let Err(error) = validate_operation_metadata_header(manifest, &metadata, metadata_file) {
-        diagnostics.push(materialization_warning(
-            error,
-        ));
+        diagnostics.push(materialization_warning(error));
     }
     Ok(metadata)
 }
@@ -2074,8 +2061,13 @@ surface:
         assert!(!materialized_dir.exists());
         assert!(backup.exists());
 
-        restore_materialization_backup(&layout, &workspace_name(), &source_name(), Some(backup))
-            .expect("restore materialization");
+        replace_or_retire_v4_materialization(
+            &layout,
+            &workspace_name(),
+            &source_name(),
+            Some(&backup),
+        )
+        .expect("restore materialization");
 
         assert!(materialized_dir.join(PROJECTIONS_FILENAME).exists());
     }

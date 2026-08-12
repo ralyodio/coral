@@ -1480,14 +1480,12 @@ async fn search_reads_v4_catalog_from_database_after_legacy_artifacts_are_remove
         SearchProvider::CatalogMetadata,
         SearchProviderState::ResultsFound,
     );
-    assert!(response.results.iter().any(|result| matches!(
-        result.payload.as_ref(),
-        Some(search_result::Payload::CatalogMetadata(metadata))
-            if metadata.item.as_ref().and_then(|item| item.item.as_ref()).is_some_and(|item| {
-                matches!(item, catalog_item::Item::Table(table)
-                    if table.schema_name == "github_v4_query" && table.name == "issues")
-            })
-    )));
+    assert!(response.results.iter().any(|result| {
+        result
+            .surface
+            .as_ref()
+            .is_some_and(|entry| entry.schema_name == "github_v4_query" && entry.name == "issues")
+    }));
 }
 
 #[tokio::test]

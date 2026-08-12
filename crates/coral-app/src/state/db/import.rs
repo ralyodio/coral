@@ -520,7 +520,7 @@ mod tests {
     use crate::credentials::CredentialStorageKind;
     use crate::sources::SourceName;
     use crate::sources::materialization::{
-        MaterializationInputs, build_v4_materialization_tmp, replace_v4_materialization,
+        MaterializationInputs, build_v4_materialization_tmp, replace_or_retire_v4_materialization,
     };
     use crate::sources::model::{InstalledSource, SourceOrigin};
     use crate::state::db::session::DbRepos;
@@ -1307,11 +1307,11 @@ mod tests {
             &MaterializationInputs::default(),
             "test",
         );
-        replace_v4_materialization(
+        replace_or_retire_v4_materialization(
             &layout,
             &workspace,
             &healthy.name,
-            &build.expect("build materialization").temp_dir,
+            Some(&build.expect("build materialization").temp_dir),
         )
         .expect("install legacy materialization");
         let corrupt_manifest = healthy_manifest.replace("healthy_v4", "corrupt_v4");
