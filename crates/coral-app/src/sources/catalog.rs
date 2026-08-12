@@ -657,8 +657,7 @@ mod tests {
 
     use super::{
         describe_manifest, list_bundled_sources, load_bundled_source,
-        parse_installed_source_manifest,
-        validate_imported_manifest_database_persistence,
+        parse_installed_source_manifest, validate_imported_manifest_database_persistence,
     };
     use crate::bootstrap::AppError;
     use crate::sources::SourceName;
@@ -707,9 +706,7 @@ mod tests {
     }
 
     fn minimal_v4_mcp_manifest(server_extra: &str) -> String {
-        format!(
-            "name: demo\ndsl_version: 4\nsurface:\n  type: mcp\n  server:\n{server_extra}"
-        )
+        format!("name: demo\ndsl_version: 4\nsurface:\n  type: mcp\n  server:\n{server_extra}")
     }
 
     #[test]
