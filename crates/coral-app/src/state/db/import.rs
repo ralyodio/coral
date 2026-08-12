@@ -1443,14 +1443,18 @@ mod tests {
             .upsert(&workspace, &source.name, &manifest_yaml, 7)
             .await
             .expect("upsert source manifest");
-        tx.state_migrations()
-            .mark_completed(WORKSPACE_CATALOG_CUTOVER_ID, 7)
-            .await
-            .expect("mark workspace cutover complete");
-        tx.state_migrations()
-            .mark_completed(SOURCE_CATALOG_IMPORT_ID, 7)
-            .await
-            .expect("mark source import complete");
+        assert!(
+            tx.state_migrations()
+                .try_claim(WORKSPACE_CATALOG_CUTOVER_ID, 7)
+                .await
+                .expect("mark workspace cutover complete")
+        );
+        assert!(
+            tx.state_migrations()
+                .try_claim(SOURCE_CATALOG_IMPORT_ID, 7)
+                .await
+                .expect("mark source import complete")
+        );
         tx.commit().await.expect("commit source");
 
         run_state_migrations(&db, &config_store, &layout)
@@ -1575,6 +1579,7 @@ mod tests {
                 source_document_raw: b"{}".to_vec(),
                 source_document_yaml: "{}".into(),
                 semantic_ir_yaml: "{}".into(),
+                operation_metadata_yaml: "{}".into(),
             }],
         };
         let mut loser_record = winner_record.clone();
@@ -1722,7 +1727,7 @@ auth: { type: HeaderAuth, headers: [{ name: Authorization, from: template, templ
             "test",
         )
         .expect("build materialization");
-        replace_v4_materialization(layout, workspace, source_name, &build.temp_dir)
+        replace_or_retire_v4_materialization(layout, workspace, source_name, Some(&build.temp_dir))
             .expect("install legacy materialization");
         let materialized_dir = layout.v4_materialized_dir(workspace, source_name);
         assert!(materialized_dir.exists());
