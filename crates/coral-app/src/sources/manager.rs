@@ -914,8 +914,7 @@ impl SourceManager {
             workspace_name,
             stored.clone(),
             request.manifest_yaml,
-        )
-        {
+        ) {
             let restore_result = restore_materialization_backup(
                 &self.layout,
                 workspace_name,
