@@ -171,7 +171,10 @@ impl SearchManager {
                         continue;
                     };
                     let observed_values_policy = if self.observed_values_search_enabled {
-                        Some(self.observed_retrieval_policy(&request.workspace_name).await)
+                        Some(
+                            self.observed_retrieval_policy(&request.workspace_name)
+                                .await,
+                        )
                     } else {
                         None
                     };
