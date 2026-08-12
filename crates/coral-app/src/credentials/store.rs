@@ -1914,6 +1914,7 @@ mod tests {
                     variables: BTreeMap::new(),
                     secrets: vec!["GITHUB_TOKEN".to_string()],
                     credential_storage: Some(CredentialStorageKind::Database),
+                    credential_revision: uuid::Uuid::default(),
                     origin: SourceOrigin::Bundled,
                 },
                 1,
