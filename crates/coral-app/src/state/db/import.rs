@@ -1310,7 +1310,7 @@ mod tests {
         let healthy_descriptor = temp.path().join("healthy-openapi.json");
         fs::write(&healthy_descriptor, OPENAPI_FIXTURE).expect("write OpenAPI fixture");
         let healthy_manifest = format!(
-            "name: {}\ndsl_version: 4\nsurfaces:\n- id: rest\n  type: openapi\n  file: {}\n",
+            "name: {}\ndsl_version: 4\nsurface:\n  type: openapi\n  file: {}\n",
             healthy.name,
             healthy_descriptor.display()
         );
@@ -1739,8 +1739,7 @@ auth: { type: HeaderAuth, headers: [{ name: Authorization, from: template, templ
             r"
 name: {name}
 dsl_version: 4
-surfaces:
-  - id: rest
+surface:
     type: openapi
     file: {}
 ",
