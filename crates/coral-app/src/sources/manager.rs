@@ -2509,10 +2509,7 @@ tables:
             "credential material should be preserved when directory staging fails"
         );
         assert!(
-            manager
-                .get_source(&workspace_name, &source_name)
-                .await
-                .is_ok(),
+            manager.get_source(&workspace_name, &source_name).is_ok(),
             "source metadata should be preserved when directory staging fails"
         );
         assert!(

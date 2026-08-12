@@ -438,7 +438,7 @@ tables:
         let db = open_test_database(layout)
             .await
             .expect("open test database");
-        run_state_migrations(&db, config_store)
+        run_state_migrations(&db, config_store, layout)
             .await
             .expect("run state migrations");
         db

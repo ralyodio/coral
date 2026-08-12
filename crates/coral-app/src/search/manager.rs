@@ -844,7 +844,7 @@ mod tests {
     use super::{
         REBUILD_SEARCH_INDEX_OPERATION, SEARCH_MAINTENANCE_PROVIDER_FAILURE_ERROR_TYPE,
         SEARCH_MAINTENANCE_TELEMETRY_ERROR_MESSAGE, SEARCH_TELEMETRY_ERROR_MESSAGE,
-        run_search_maintenance_operation, run_search_operation, search_manager_error_message,
+        run_search_maintenance_operation, run_search_operation,
     };
     use crate::bootstrap::AppError;
     use crate::search::maintenance::{
@@ -1123,7 +1123,8 @@ mod tests {
         .await
         .expect_err("search operation should return its detailed error");
 
-        assert!(search_manager_error_message(&error).contains(error_sentinel));
+        let SearchManagerError::App(app_error) = &error;
+        assert!(app_error.to_string().contains(error_sentinel));
 
         provider.force_flush().expect("flush spans");
         let spans = exporter.get_finished_spans().expect("finished spans");
