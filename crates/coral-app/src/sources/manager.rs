@@ -2673,7 +2673,7 @@ surface:
         layout.ensure().expect("ensure layout");
         let config_store = ConfigStore::new(layout.clone());
         let credential_manager = CredentialManager::new(CredentialStore::new(layout.clone()));
-        let manager = SourceManager::new_for_tests(config_store, credential_manager, layout);
+        let manager = source_manager_for_tests(config_store, credential_manager, layout);
         let candidate = CandidateSource {
             name: SourceName::parse("coral_db").expect("source"),
             description: String::new(),
@@ -2788,9 +2788,8 @@ surface:
         let credential_store = CredentialStore::new(layout.clone());
         let credential_manager = CredentialManager::new(credential_store);
         let search_observations = SearchObservationHandle::new(layout.clone());
-        let manager =
-            SourceManager::new_for_tests(config_store, credential_manager, layout.clone())
-                .with_search_observation_handle(search_observations.clone());
+        let manager = source_manager_for_tests(config_store, credential_manager, layout.clone())
+            .with_search_observation_handle(search_observations.clone());
         let workspace_name = default_workspace();
         let source_name = SourceName::parse("github").expect("source name");
 
@@ -3433,8 +3432,7 @@ surface:
         layout.ensure().expect("ensure layout");
         let config_store = ConfigStore::new(layout.clone());
         let credential_manager = CredentialManager::new(CredentialStore::new(layout.clone()));
-        let manager =
-            SourceManager::new_for_tests(config_store, credential_manager, layout.clone());
+        let manager = source_manager_for_tests(config_store, credential_manager, layout.clone());
         let workspace = default_workspace();
 
         let first = manager
@@ -3795,7 +3793,7 @@ surface:
         let config_store = ConfigStore::new(layout.clone());
         let credential_manager = CredentialManager::new(CredentialStore::new(layout.clone()));
         let manager =
-            SourceManager::new_for_tests(config_store.clone(), credential_manager, layout.clone());
+            source_manager_for_tests(config_store.clone(), credential_manager, layout.clone());
         let workspace_name = default_workspace();
         let revision = active_revision(&manager, &workspace_name).await;
         let deletion_marker = manager
@@ -3839,7 +3837,7 @@ surface:
         let config_store = ConfigStore::new(layout.clone());
         let credential_manager = CredentialManager::new(CredentialStore::new(layout.clone()));
         let manager =
-            SourceManager::new_for_tests(config_store.clone(), credential_manager, layout.clone());
+            source_manager_for_tests(config_store.clone(), credential_manager, layout.clone());
         let fixture = OAuthFixture::new();
         let redirect_port = free_loopback_port();
         let (manifest_yaml, _) =
@@ -4220,13 +4218,14 @@ surface:
             ConfigStore::new(layout.clone()),
             CredentialManager::new(CredentialStore::new(layout.clone())),
             layout,
-        )
-        .await;
+        );
         let redirect_port = free_loopback_port();
         let (event_tx, mut event_rx) = import_event_channel();
         let workspace_name = default_workspace();
+        let revision = active_revision(&manager, &workspace_name).await;
         let import = manager.import_source_with_credentials(
             &workspace_name,
+            revision,
             ImportSourceWithCredentialsCommand {
                 manifest_yaml: manifest_with_oauth_secret(
                     "http://127.0.0.1:1/token",

@@ -262,7 +262,7 @@ mod tests {
             None
         );
 
-        run_state_migrations(&db, &config_store)
+        run_state_migrations(&db, &config_store, &layout)
             .await
             .expect("run state migrations after workspace cutover");
 
