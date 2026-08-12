@@ -42,6 +42,7 @@ pub(crate) use local_store::{
     StoredTraceInvocationKind, StoredTraceOperationKind, StoredTraceStatus, TraceQueryHistoryEntry,
     TraceQueryTableFunctionUsage, TraceQueryTableUsage, TraceStoreError, TraceSummaryRecord,
 };
+#[cfg(test)]
 pub(crate) use manager::TraceManager;
 
 static INIT: OnceLock<Result<TracingInitState, String>> = OnceLock::new();

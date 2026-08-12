@@ -84,7 +84,7 @@ impl TraceServiceApi for TraceService {
                     let mut summaries = list_database_traces(
                         &traces,
                         db.as_ref(),
-                        workspace.as_ref().map(|workspace| workspace.as_str()),
+                        workspace.as_ref().map(WorkspaceName::as_str),
                         page_size.saturating_add(1),
                         offset,
                     )
