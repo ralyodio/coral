@@ -3858,8 +3858,9 @@ surface:
         );
         assert!(
             config_store
-                .list_workspace_sources(&workspace_name)
-                .expect("list sources")
+                .load_config()
+                .expect("load config")
+                .workspace_sources(&workspace_name)
                 .is_empty()
         );
         let source_name = SourceName::parse("public_messages").expect("source");
@@ -3948,8 +3949,9 @@ surface:
         fixture.token_server.await.expect("token server");
         assert!(
             config_store
-                .list_workspace_sources(&workspace_name)
-                .expect("list sources")
+                .load_config()
+                .expect("load config")
+                .workspace_sources(&workspace_name)
                 .is_empty()
         );
         let source_name = SourceName::parse("secured_messages").expect("source");
