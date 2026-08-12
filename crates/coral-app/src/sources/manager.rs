@@ -573,7 +573,7 @@ impl SourceManager {
             &oauth_credential_retrievals,
         )?;
         if origin == SourceOrigin::Imported
-            && let Some(manifest_yaml) = manifest_yaml
+            && let Some(manifest_yaml) = &manifest_yaml
         {
             validate_imported_manifest_database_persistence(
                 manifest_yaml,

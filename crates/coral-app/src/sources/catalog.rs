@@ -267,12 +267,12 @@ fn validate_v4_source_for_database_persistence(
                     &runtime.base_url,
                 )?;
             }
-            coral_spec::v4::SurfaceRuntimeConfig::Database(_) => {
-                // Database surfaces carry their credentials in the connection
-                // spec, which the database connection layer validates on its
-                // own. There is no surface auth/header/base_url transport to
-                // guard for imported-manifest persistence here.
-            }
+        }
+        coral_spec::v4::SurfaceRuntimeConfig::Database(_) => {
+            // Database surfaces carry their credentials in the connection
+            // spec, which the database connection layer validates on its
+            // own. There is no surface auth/header/base_url transport to
+            // guard for imported-manifest persistence here.
         }
         coral_spec::v4::SurfaceRuntimeConfig::Mcp(runtime) => {
             validate_mcp_server_for_database_persistence(
