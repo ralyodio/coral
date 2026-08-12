@@ -716,8 +716,7 @@ impl SourceManager {
             }
             return Err(error);
         }
-        if let Err(error) = self
-            .remove_db_source_with_state_lock_held(workspace_name, source_name)
+        if let Err(error) = self.remove_db_source_with_state_lock_held(workspace_name, source_name)
         {
             let restore_dir_result = source_dir_backup.restore();
             self.restore_source_rollback_state_with_state_lock_held(

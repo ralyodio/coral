@@ -1740,6 +1740,7 @@ mod tests {
             credential_manager,
             QueryRuntimeContext::default(),
             layout,
+            WorkspaceLifecycleLock::default(),
             Vec::new(),
             db,
         );
