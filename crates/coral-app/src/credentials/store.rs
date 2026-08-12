@@ -871,7 +871,7 @@ fn credential_document_write_from_encrypted(
         wrapped_dek_nonce: document.wrapped_dek_nonce,
         key_id: document.key_id,
         algorithm: document.algorithm,
-        aad_version: document.aad_version,
+        aad_version: document.binding_version,
     }
 }
 
@@ -883,7 +883,7 @@ fn encrypted_document_from_record(record: CredentialDocumentRecord) -> Encrypted
         wrapped_dek_nonce: record.wrapped_dek_nonce,
         key_id: record.key_id,
         algorithm: record.algorithm,
-        aad_version: record.aad_version,
+        binding_version: record.aad_version,
     }
 }
 
