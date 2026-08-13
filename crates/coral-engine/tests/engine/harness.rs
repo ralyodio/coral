@@ -10,6 +10,7 @@ use coral_engine::{
     CoreError, HttpRuntimeBackend, HttpRuntimeCatalog, HttpRuntimeRelation, QueryExecution,
     QueryRuntimeConfig, QuerySource, RuntimeSourcePackage, StatusCode,
 };
+use coral_spec::backends::http::HttpSourceManifest;
 use coral_spec::{SqlObjectName, parse_source_manifest_value};
 use parquet::arrow::ArrowWriter;
 use serde_json::{Value, json};
@@ -29,12 +30,7 @@ pub(crate) fn build_v4_http_function_source(
     sql_function_name: Option<&str>,
     authored_version: Option<&str>,
 ) -> QuerySource {
-    let mut manifest = parse_source_manifest_value(value)
-        .expect("HTTP manifest")
-        .as_http()
-        .expect("HTTP source")
-        .clone();
-    manifest.common.dsl_version = 4;
+    let manifest = v4_http_manifest(value);
     let function = manifest.functions.first().expect("HTTP function").clone();
     let relation = HttpRuntimeRelation::try_table_function(
         SqlObjectName::new(
@@ -45,26 +41,7 @@ pub(crate) fn build_v4_http_function_source(
         function,
     )
     .expect("runtime function");
-    let catalog = HttpRuntimeCatalog::try_new(
-        catalog_name,
-        HttpRuntimeBackend::from_manifest(&manifest),
-        vec![relation],
-    )
-    .expect("runtime catalog");
-    QuerySource::from_runtime_catalog(
-        RuntimeSourcePackage {
-            source_name: catalog_name.to_string(),
-            authored_version: authored_version.map(ToString::to_string),
-            description: String::new(),
-            declared_inputs: Vec::new(),
-            test_queries: Vec::new(),
-            identity_requirements: None,
-            catalog: Some(catalog.into()),
-        },
-        BTreeMap::new(),
-        BTreeMap::new(),
-    )
-    .expect("query source")
+    build_v4_http_source(&manifest, catalog_name, relation, authored_version)
 }
 
 pub(crate) fn build_v4_http_table_source(
@@ -72,28 +49,42 @@ pub(crate) fn build_v4_http_table_source(
     catalog_name: &str,
     schema_name: &str,
 ) -> QuerySource {
-    let mut manifest = parse_source_manifest_value(value)
-        .expect("HTTP manifest")
-        .as_http()
-        .expect("HTTP source")
-        .clone();
-    manifest.common.dsl_version = 4;
+    let manifest = v4_http_manifest(value);
     let table = manifest.tables.first().expect("HTTP table").clone();
     let relation = HttpRuntimeRelation::try_table(
         SqlObjectName::new(catalog_name, schema_name, table.name()),
         table,
     )
     .expect("runtime table");
+    build_v4_http_source(&manifest, catalog_name, relation, None)
+}
+
+fn v4_http_manifest(value: Value) -> HttpSourceManifest {
+    let mut manifest = parse_source_manifest_value(value)
+        .expect("HTTP manifest")
+        .as_http()
+        .expect("HTTP source")
+        .clone();
+    manifest.common.dsl_version = 4;
+    manifest
+}
+
+fn build_v4_http_source(
+    manifest: &HttpSourceManifest,
+    catalog_name: &str,
+    relation: HttpRuntimeRelation,
+    authored_version: Option<&str>,
+) -> QuerySource {
     let catalog = HttpRuntimeCatalog::try_new(
         catalog_name,
-        HttpRuntimeBackend::from_manifest(&manifest),
+        HttpRuntimeBackend::from_manifest(manifest),
         vec![relation],
     )
     .expect("runtime catalog");
     QuerySource::from_runtime_catalog(
         RuntimeSourcePackage {
             source_name: catalog_name.to_string(),
-            authored_version: None,
+            authored_version: authored_version.map(ToString::to_string),
             description: String::new(),
             declared_inputs: Vec::new(),
             test_queries: Vec::new(),
