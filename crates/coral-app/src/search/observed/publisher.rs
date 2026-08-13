@@ -668,23 +668,31 @@ tables:
 
     /// Package whose runtime catalog contains two distinct SQL schemas.
     fn divergent_component_query_source() -> QuerySource {
+        runtime_catalog_query_source("github_v4", &["github_v4_rest", "github_v4_mcp"])
+    }
+
+    fn single_component_query_source(source_name: &str) -> QuerySource {
+        runtime_catalog_query_source(source_name, &[source_name])
+    }
+
+    fn runtime_catalog_query_source(source_name: &str, schema_names: &[&str]) -> QuerySource {
         QuerySource::from_runtime_catalog(
             RuntimeSourcePackage {
-                source_name: "github_v4".to_string(),
+                source_name: source_name.to_string(),
                 authored_version: None,
                 description: String::new(),
                 declared_inputs: Vec::new(),
                 test_queries: Vec::new(),
                 identity_requirements: None,
-                catalog: Some(divergent_http_catalog()),
+                catalog: Some(http_catalog(schema_names)),
             },
             BTreeMap::new(),
             BTreeMap::new(),
         )
-        .expect("divergent component query source")
+        .expect("runtime catalog query source")
     }
 
-    fn divergent_http_catalog() -> RuntimeCatalog {
+    fn http_catalog(schema_names: &[&str]) -> RuntimeCatalog {
         let manifest = parse_source_manifest_yaml(
             r"
 dsl_version: 3
@@ -705,11 +713,11 @@ tables:
         .expect("component manifest");
         let manifest = manifest.as_http().expect("HTTP component");
         let table = manifest.tables.first().expect("one table").clone();
-        let relations = ["github_v4_rest", "github_v4_mcp"]
-            .into_iter()
+        let relations = schema_names
+            .iter()
             .map(|schema_name| {
                 HttpRuntimeRelation::try_table(
-                    SqlObjectName::new("datafusion", schema_name, "list_issues"),
+                    SqlObjectName::new("datafusion", *schema_name, "list_issues"),
                     table.clone(),
                 )
             })
