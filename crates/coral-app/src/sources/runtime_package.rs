@@ -1210,41 +1210,41 @@ surface:
             diagnostics: Vec::new(),
         };
         materialized.surface.source_document_sha256 = Some("document-one".to_string());
-        let component =
-            runtime_manifest_for_v4_source(&manifest, &materialized).expect("component");
-        let first =
-            runtime_contract_fingerprint("name: demo", &BTreeMap::new(), component.as_ref())
-                .expect("first fingerprint");
+        let component = runtime_manifest_for_v4_source(&manifest, &materialized)
+            .expect("runtime manifest")
+            .expect("published component");
+        let first = runtime_contract_fingerprint("name: demo", &BTreeMap::new(), Some(&component))
+            .expect("first fingerprint");
 
         materialized.surface.raw_source_document_path = PathBuf::from("/second/raw.json");
         materialized.surface.normalized_source_document_path =
             PathBuf::from("/second/normalized.json");
-        let moved_component =
-            runtime_manifest_for_v4_source(&manifest, &materialized).expect("component");
+        let moved_component = runtime_manifest_for_v4_source(&manifest, &materialized)
+            .expect("runtime manifest")
+            .expect("published component");
         let moved =
-            runtime_contract_fingerprint("name: demo", &BTreeMap::new(), moved_component.as_ref())
+            runtime_contract_fingerprint("name: demo", &BTreeMap::new(), Some(&moved_component))
                 .expect("moved fingerprint");
         assert_eq!(first, moved);
 
         materialized.surface.source_document_sha256 = Some("document-two".to_string());
-        let changed_component =
-            runtime_manifest_for_v4_source(&manifest, &materialized).expect("component");
-        let changed = runtime_contract_fingerprint(
-            "name: demo",
-            &BTreeMap::new(),
-            changed_component.as_ref(),
-        )
-        .expect("changed fingerprint");
+        let changed_component = runtime_manifest_for_v4_source(&manifest, &materialized)
+            .expect("runtime manifest")
+            .expect("published component");
+        let changed =
+            runtime_contract_fingerprint("name: demo", &BTreeMap::new(), Some(&changed_component))
+                .expect("changed fingerprint");
         assert_eq!(first, changed);
 
         materialized.fingerprint = None;
         materialized.surface.source_document_sha256 = None;
-        let without_provenance_component =
-            runtime_manifest_for_v4_source(&manifest, &materialized).expect("component");
+        let without_provenance_component = runtime_manifest_for_v4_source(&manifest, &materialized)
+            .expect("runtime manifest")
+            .expect("published component");
         let without_optional_provenance = runtime_contract_fingerprint(
             "name: demo",
             &BTreeMap::new(),
-            without_provenance_component.as_ref(),
+            Some(&without_provenance_component),
         )
         .expect("fingerprint without optional provenance");
         assert_eq!(first, without_optional_provenance);
@@ -1286,16 +1286,18 @@ surface:
             surface: openapi_surface(),
         };
         let first_materialized = materialized(1);
-        let first_component =
-            runtime_manifest_for_v4_source(&manifest, &first_materialized).expect("component");
+        let first_component = runtime_manifest_for_v4_source(&manifest, &first_materialized)
+            .expect("runtime manifest")
+            .expect("published component");
         let second_materialized = materialized(2);
-        let second_component =
-            runtime_manifest_for_v4_source(&manifest, &second_materialized).expect("component");
+        let second_component = runtime_manifest_for_v4_source(&manifest, &second_materialized)
+            .expect("runtime manifest")
+            .expect("published component");
         let first =
-            runtime_contract_fingerprint("name: demo", &BTreeMap::new(), first_component.as_ref())
+            runtime_contract_fingerprint("name: demo", &BTreeMap::new(), Some(&first_component))
                 .expect("first fingerprint");
         let second =
-            runtime_contract_fingerprint("name: demo", &BTreeMap::new(), second_component.as_ref())
+            runtime_contract_fingerprint("name: demo", &BTreeMap::new(), Some(&second_component))
                 .expect("second fingerprint");
 
         assert_ne!(first, second);

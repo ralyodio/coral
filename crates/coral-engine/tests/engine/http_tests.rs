@@ -9,12 +9,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use coral_engine::{
-    CoralQuery, CoreError, EngineExtensions, HttpRuntimeBackend, HttpRuntimeCatalog,
-    HttpRuntimeRelation, QueryParameterValue, QueryParameters, QueryRuntimeConfig,
-    QueryRuntimeContext, QuerySource, RequestAuthenticator, RequestAuthenticatorError,
-    RuntimeSourcePackage, StatusCode,
+    CoralQuery, CoreError, EngineExtensions, QueryParameterValue, QueryParameters,
+    QueryRuntimeConfig, QueryRuntimeContext, RequestAuthenticator, RequestAuthenticatorError,
+    StatusCode,
 };
-use coral_spec::{SqlObjectName, parse_source_manifest_value};
 use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -25,7 +23,8 @@ use wiremock::matchers::{
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 use crate::harness::{
-    build_source, build_source_with_secrets, execution_to_rows, test_runtime, users_rows,
+    build_source, build_source_with_secrets, build_v4_http_function_source, execution_to_rows,
+    test_runtime, users_rows,
 };
 
 fn base_http_manifest(name: &str, base_url: &str) -> Value {
@@ -108,45 +107,6 @@ fn function_only_search_manifest(name: &str, base_url: &str) -> Value {
         .expect("manifest is an object")
         .remove("tables");
     manifest
-}
-
-fn build_v4_http_function_source(
-    manifest: Value,
-    catalog_name: &str,
-    schema_name: &str,
-) -> QuerySource {
-    let mut manifest = parse_source_manifest_value(manifest)
-        .expect("HTTP manifest")
-        .as_http()
-        .expect("HTTP source")
-        .clone();
-    manifest.common.dsl_version = 4;
-    let function = manifest.functions[0].clone();
-    let relation = HttpRuntimeRelation::try_table_function(
-        SqlObjectName::new(catalog_name, schema_name, &function.name),
-        function,
-    )
-    .expect("runtime function");
-    let catalog = HttpRuntimeCatalog::try_new(
-        catalog_name,
-        HttpRuntimeBackend::from_manifest(&manifest),
-        vec![relation],
-    )
-    .expect("runtime catalog");
-    QuerySource::from_runtime_catalog(
-        RuntimeSourcePackage {
-            source_name: catalog_name.to_string(),
-            authored_version: Some("1.0.0".to_string()),
-            description: String::new(),
-            declared_inputs: Vec::new(),
-            test_queries: Vec::new(),
-            identity_requirements: None,
-            catalog: Some(catalog.into()),
-        },
-        BTreeMap::new(),
-        BTreeMap::new(),
-    )
-    .expect("query source")
 }
 
 async fn spawn_raw_http_path_recorder(
@@ -1372,6 +1332,8 @@ async fn v4_http_table_function_uses_three_part_identity_and_provenance() {
         function_only_search_manifest("github_v4", &server.uri()),
         "github_v4",
         "issues",
+        None,
+        Some("1.0.0"),
     );
     let sql = "SELECT title, score FROM github_v4.issues.search_issues(q => 'flaky')";
 
@@ -1411,6 +1373,35 @@ async fn v4_http_table_function_uses_three_part_identity_and_provenance() {
     assert!(
         error.to_string().contains("github_v4.issues.search_issues"),
         "error should provide the canonical identity: {error}"
+    );
+}
+
+#[tokio::test]
+async fn v4_http_table_function_argument_errors_use_registered_sql_alias() {
+    let server = MockServer::start().await;
+    let source = build_v4_http_function_source(
+        function_only_search_manifest("github_v4", &server.uri()),
+        "github_v4",
+        "issues",
+        Some("find_issues"),
+        None,
+    );
+
+    let error = CoralQuery::execute_sql(
+        &[source],
+        test_runtime(),
+        "SELECT * FROM github_v4.issues.find_issues()",
+    )
+    .await
+    .expect_err("missing required argument should fail");
+    let detail = error.to_string();
+    assert!(
+        detail.contains("github_v4.issues.find_issues missing required argument(s): q"),
+        "error should use the registered SQL alias: {detail}"
+    );
+    assert!(
+        !detail.contains("search_issues missing required argument"),
+        "error should not use the authored manifest name: {detail}"
     );
 }
 

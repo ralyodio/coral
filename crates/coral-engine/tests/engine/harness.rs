@@ -6,8 +6,11 @@ use std::sync::Arc;
 use arrow::array::{Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use coral_engine::{CoreError, QueryExecution, QueryRuntimeConfig, QuerySource, StatusCode};
-use coral_spec::parse_source_manifest_value;
+use coral_engine::{
+    CoreError, HttpRuntimeBackend, HttpRuntimeCatalog, HttpRuntimeRelation, QueryExecution,
+    QueryRuntimeConfig, QuerySource, RuntimeSourcePackage, StatusCode,
+};
+use coral_spec::{SqlObjectName, parse_source_manifest_value};
 use parquet::arrow::ArrowWriter;
 use serde_json::{Value, json};
 
@@ -17,6 +20,90 @@ pub(crate) fn test_runtime() -> QueryRuntimeConfig {
 
 pub(crate) fn build_source(value: Value) -> QuerySource {
     build_source_with_inputs(value, BTreeMap::new(), BTreeMap::new())
+}
+
+pub(crate) fn build_v4_http_function_source(
+    value: Value,
+    catalog_name: &str,
+    schema_name: &str,
+    sql_function_name: Option<&str>,
+    authored_version: Option<&str>,
+) -> QuerySource {
+    let mut manifest = parse_source_manifest_value(value)
+        .expect("HTTP manifest")
+        .as_http()
+        .expect("HTTP source")
+        .clone();
+    manifest.common.dsl_version = 4;
+    let function = manifest.functions.first().expect("HTTP function").clone();
+    let relation = HttpRuntimeRelation::try_table_function(
+        SqlObjectName::new(
+            catalog_name,
+            schema_name,
+            sql_function_name.unwrap_or(&function.name),
+        ),
+        function,
+    )
+    .expect("runtime function");
+    let catalog = HttpRuntimeCatalog::try_new(
+        catalog_name,
+        HttpRuntimeBackend::from_manifest(&manifest),
+        vec![relation],
+    )
+    .expect("runtime catalog");
+    QuerySource::from_runtime_catalog(
+        RuntimeSourcePackage {
+            source_name: catalog_name.to_string(),
+            authored_version: authored_version.map(ToString::to_string),
+            description: String::new(),
+            declared_inputs: Vec::new(),
+            test_queries: Vec::new(),
+            identity_requirements: None,
+            catalog: Some(catalog.into()),
+        },
+        BTreeMap::new(),
+        BTreeMap::new(),
+    )
+    .expect("query source")
+}
+
+pub(crate) fn build_v4_http_table_source(
+    value: Value,
+    catalog_name: &str,
+    schema_name: &str,
+) -> QuerySource {
+    let mut manifest = parse_source_manifest_value(value)
+        .expect("HTTP manifest")
+        .as_http()
+        .expect("HTTP source")
+        .clone();
+    manifest.common.dsl_version = 4;
+    let table = manifest.tables.first().expect("HTTP table").clone();
+    let relation = HttpRuntimeRelation::try_table(
+        SqlObjectName::new(catalog_name, schema_name, table.name()),
+        table,
+    )
+    .expect("runtime table");
+    let catalog = HttpRuntimeCatalog::try_new(
+        catalog_name,
+        HttpRuntimeBackend::from_manifest(&manifest),
+        vec![relation],
+    )
+    .expect("runtime catalog");
+    QuerySource::from_runtime_catalog(
+        RuntimeSourcePackage {
+            source_name: catalog_name.to_string(),
+            authored_version: None,
+            description: String::new(),
+            declared_inputs: Vec::new(),
+            test_queries: Vec::new(),
+            identity_requirements: None,
+            catalog: Some(catalog.into()),
+        },
+        BTreeMap::new(),
+        BTreeMap::new(),
+    )
+    .expect("query source")
 }
 
 pub(crate) fn build_source_with_secrets(

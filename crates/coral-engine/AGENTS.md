@@ -30,9 +30,11 @@ registration, and query execution.
   validated source-spec types and backend-specific spec structs from there.
 - Runtime code should work with compiled sources and generic metadata, not app
   policy or transport concerns.
-- Runtime catalogs are the app-to-engine package boundary. Do not add a
-  backend that reaches back into DSL v4 materialization or authored-manifest
-  types when `coral-app` can assemble an existing backend-ready catalog.
+- `RuntimeSourcePackage` is the app-to-engine package boundary. Its optional
+  `RuntimeCatalog` is the backend-ready relation payload; source identity,
+  inputs, test queries, and identity requirements remain package-level fields.
+  Do not add a backend that reaches back into DSL v4 materialization or
+  authored-manifest types when `coral-app` can assemble that package.
 - Reuse database connection pools only through an explicit
   `DatabasePoolRegistry` supplied by the caller and key its pool map directly
   by the workspace-local, unique SQL catalog name. Keep pool implementation in

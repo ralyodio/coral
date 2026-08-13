@@ -16,7 +16,7 @@ root.
 - bundled-source manifest description and install-time manifest mapping through
   `coral-spec`
 - assembly of query-engine runtime packages from app-owned installed state,
-  including DSL v4 materialized artifacts and generated runtime components
+  including DSL v4 materialized artifacts and generated runtime catalogs
 - query-time selection of installed sources before calling `coral-engine`
 - workspace-scoped catalog discovery behavior over query-visible tables:
   matching, pagination, exact lookup, column filtering, and missing-table
@@ -102,7 +102,7 @@ root.
   `parameter_metadata.yaml` files are inert and must not be migrated, deleted,
   or interpreted at load time.
 - A valid DSL v4 source with no published projections still has a loadable
-  semantic IR. Runtime package assembly returns no component for that source;
+  semantic IR. Runtime package assembly returns no catalog for that source;
   it must not treat the empty projection catalog as a corrupt materialization.
 - User-facing runtime feature semantics belong in `coral_app::features`; raw
   config-file persistence, locking, and TOML extraction stay in `state/`.
@@ -143,8 +143,8 @@ root.
   not reimplement table matching, column filtering, pagination, or
   missing-table context.
 - `sources/runtime_package.rs` owns app-level conversion from installed source
-  state and materialized artifacts into the generic runtime catalog accepted
-  by `coral-engine`.
+  state and materialized artifacts into the `RuntimeSourcePackage` accepted by
+  `coral-engine`, including its optional generic runtime catalog.
 - For all service calls, keep protobuf request/response types confined to the
   service edge. Convert request data into small app-local command, query, or
   binding structs before calling managers; do not pass `coral_api::v1`

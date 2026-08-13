@@ -18,7 +18,10 @@ use tokio::task::JoinHandle;
 use wiremock::matchers::{method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use crate::harness::{build_source, dir_url, execution_to_rows, test_runtime, write_jsonl_file};
+use crate::harness::{
+    build_source, build_v4_http_table_source, dir_url, execution_to_rows, test_runtime,
+    write_jsonl_file,
+};
 
 #[tokio::test]
 async fn sql_join_fetches_http_dependent_rows_per_distinct_binding_tuple() {
@@ -1683,6 +1686,52 @@ async fn dependent_join_source_config_disables_rewrite_for_source() {
         SELECT i.title AS issue_title, pr.state AS pr_state
         FROM issues.items AS i
         JOIN github.pull_requests AS pr
+          ON pr.owner = i.github_owner
+         AND pr.repo = i.github_repo
+         AND pr.number = i.github_pr_number
+        ORDER BY i.title
+        ",
+    )
+    .await
+    .expect("explain should succeed");
+
+    let explain = execution_text(&execution);
+    assert!(!explain.contains("DependentJoinExec"), "{explain}");
+}
+
+#[tokio::test]
+async fn dependent_join_source_config_uses_installed_name_for_v4_catalog() {
+    let temp = TempDir::new().expect("temp dir");
+    write_jsonl_file(
+        temp.path(),
+        "issues.jsonl",
+        &[issue_row("First", "withcoral", "coral", 123)],
+    );
+
+    let execution = CoralQuery::execute_sql(
+        &[
+            build_source(issues_manifest(temp.path())),
+            build_v4_http_table_source(
+                github_broad_query_manifest("http://127.0.0.1:9"),
+                "github_v4",
+                "issues",
+            ),
+        ],
+        runtime_with_dependent_join(DependentJoinConfig {
+            per_source: BTreeMap::from([(
+                "github_v4".to_string(),
+                DependentJoinSourceConfig {
+                    enabled: Some(false),
+                    ..DependentJoinSourceConfig::default()
+                },
+            )]),
+            ..DependentJoinConfig::default()
+        }),
+        "
+        EXPLAIN
+        SELECT i.title AS issue_title, pr.state AS pr_state
+        FROM issues.items AS i
+        JOIN github_v4.issues.pull_requests AS pr
           ON pr.owner = i.github_owner
          AND pr.repo = i.github_repo
          AND pr.number = i.github_pr_number

@@ -123,6 +123,8 @@ tables:
     .as_http()
     .expect("HTTP source")
     .clone();
+    // Parse under the v3 schema because this focused fixture intentionally
+    // omits the authored v4 `surface`; only the lowered runtime catalog is v4.
     manifest.common.dsl_version = 4;
     manifest
 }

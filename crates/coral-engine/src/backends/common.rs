@@ -181,12 +181,14 @@ pub(crate) struct CatalogTarget {
 
 impl CatalogTarget {
     pub(crate) fn new(catalog_name: impl Into<SqlIdentifier>) -> Self {
-        let catalog_name = catalog_name.into();
-        let publication = if catalog_name == crate::runtime::DATAFUSION_DEFAULT_CATALOG {
-            CatalogPublication::ExtendExisting
-        } else {
-            CatalogPublication::InstallNew
-        };
+        let mut catalog_name = catalog_name.into();
+        let publication =
+            if catalog_name.eq_ignore_ascii_case(crate::runtime::DATAFUSION_DEFAULT_CATALOG) {
+                catalog_name = crate::runtime::DATAFUSION_DEFAULT_CATALOG.to_string();
+                CatalogPublication::ExtendExisting
+            } else {
+                CatalogPublication::InstallNew
+            };
         Self {
             catalog_name,
             publication,

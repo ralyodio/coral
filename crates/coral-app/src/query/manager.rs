@@ -1159,7 +1159,11 @@ fn task_query_relations(provenance: &QueryExecutionProvenance) -> Vec<TaskQueryR
             )
         })
         .chain(provenance.table_functions().iter().map(|function| {
-            TaskQueryRelation::table_function(function.schema_name(), function.function_name())
+            TaskQueryRelation::table_function(
+                function.catalog_name(),
+                function.schema_name(),
+                function.function_name(),
+            )
         }))
         .collect()
 }
@@ -1193,7 +1197,8 @@ fn required_query_guides(
     }
     for usage in resources.table_functions() {
         if let Some(function) = catalog.table_functions.iter().find(|function| {
-            function.schema_name == usage.schema_name()
+            function.catalog_name.as_deref() == usage.catalog_name()
+                && function.schema_name == usage.schema_name()
                 && function.function_name == usage.function_name()
         }) && function.require_guide_read
         {
@@ -1418,6 +1423,7 @@ fn record_query_provenance(span: &tracing::Span, provenance: &QueryExecutionProv
             .map(|function| {
                 json!({
                     "source_name": function.source_name(),
+                    "catalog_name": function.catalog_name(),
                     "schema_name": function.schema_name(),
                     "function_name": function.function_name(),
                 })
@@ -1510,12 +1516,13 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use coral_engine::{
-        EngineExtensions, QueryExecutionProvenance, QueryTableFunctionUsage, QueryTableUsage,
-        ResolvedQueryResources, SourceDecorator, SourceDecoratorError,
+        CatalogInfo, EngineExtensions, QueryExecutionProvenance, QueryTableFunctionUsage,
+        QueryTableUsage, ResolvedQueryResources, SourceDecorator, SourceDecoratorError,
         SourceInputResolutionContext, SourceInputResolver, SourceInputResolverError, SourceTables,
+        TableFunctionInfo,
     };
-    use coral_spec::parse_source_manifest_yaml;
     use coral_spec::v4::ProjectionCatalog;
+    use coral_spec::{SourceTableFunctionKind, parse_source_manifest_yaml};
     use serde_json::{Value, json};
     use tempfile::TempDir;
     use wiremock::matchers::{method, path};
@@ -1556,6 +1563,44 @@ mod tests {
             required_guide_id(None, schema_name, resource_name, guide),
             sha256_hex(format!("{schema_name}\0{resource_name}\0{guide}").as_bytes())
         );
+    }
+
+    #[test]
+    fn required_function_guides_match_the_invoked_catalog() {
+        let function = |catalog_name: &str, require_guide_read: bool| TableFunctionInfo {
+            catalog_name: Some(catalog_name.to_string()),
+            schema_name: "issues".to_string(),
+            function_name: "search".to_string(),
+            description: String::new(),
+            guide: format!("Read the {catalog_name} guide."),
+            require_guide_read,
+            arguments: Vec::new(),
+            result_columns: Vec::new(),
+            kind: SourceTableFunctionKind::Table,
+            search_limits: None,
+        };
+        let catalog = CatalogInfo {
+            tables: Vec::new(),
+            table_functions: vec![function("primary", false), function("archive", true)],
+        };
+        let resources = ResolvedQueryResources::new(
+            vec!["archive".to_string()],
+            Vec::new(),
+            vec![QueryTableFunctionUsage::new(
+                "archive",
+                Some("archive"),
+                "issues",
+                "search",
+            )],
+        );
+
+        let guides = required_query_guides(&catalog, &resources);
+
+        let [guide] = guides.as_slice() else {
+            panic!("expected exactly one required guide, got {guides:?}");
+        };
+        assert_eq!(guide.catalog_name.as_deref(), Some("archive"));
+        assert_eq!(guide.guide, "Read the archive guide.");
     }
 
     async fn query_manager_with(
@@ -1905,7 +1950,7 @@ mod tests {
             )],
             vec![QueryTableFunctionUsage::new(
                 "github",
-                None,
+                Some("github"),
                 "github",
                 "search_runs",
             )],
@@ -1945,7 +1990,7 @@ mod tests {
                 crate::state::db::TaskQueryRelationRecord {
                     query_id: query.id.clone(),
                     relation_kind: "table_function".to_string(),
-                    catalog_name: None,
+                    catalog_name: Some("github".to_string()),
                     schema_name: "github".to_string(),
                     relation_name: "search_runs".to_string(),
                 },
@@ -2105,7 +2150,7 @@ mod tests {
             ],
             vec![QueryTableFunctionUsage::new(
                 "github",
-                None,
+                Some("github"),
                 "github",
                 "search_issues",
             )],
@@ -2141,7 +2186,7 @@ mod tests {
                 crate::telemetry::QUERY_TRACE_TABLE_FUNCTIONS_ATTR
             ),
             Some(
-                r#"[{"source_name":"github","schema_name":"github","function_name":"search_issues"}]"#
+                r#"[{"source_name":"github","catalog_name":"github","schema_name":"github","function_name":"search_issues"}]"#
                     .to_string()
             )
         );

@@ -99,6 +99,21 @@ pub(crate) fn source_decorator_error_to_core(error: &SourceDecoratorError) -> Co
     }
 }
 
+pub(crate) fn named_source_decorator_error_to_core(
+    name: &str,
+    error: &SourceDecoratorError,
+) -> CoreError {
+    match source_decorator_error_to_core(error) {
+        CoreError::InvalidInput(detail) => {
+            CoreError::InvalidInput(format!("source decorator '{name}': {detail}"))
+        }
+        CoreError::FailedPrecondition(detail) => {
+            CoreError::FailedPrecondition(format!("source decorator '{name}': {detail}"))
+        }
+        other => other,
+    }
+}
+
 pub(crate) fn query_result_observer_error_to_core(error: &QueryResultObserverError) -> CoreError {
     match error {
         QueryResultObserverError::InvalidInput(detail) => CoreError::InvalidInput(detail.clone()),

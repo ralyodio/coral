@@ -885,8 +885,7 @@ fn sort_tables(tables: &mut [TableInfo]) {
 }
 
 fn registered_catalog_name(sql_name: &coral_spec::SqlObjectName) -> Option<String> {
-    (sql_name.catalog_name() != crate::runtime::DATAFUSION_DEFAULT_CATALOG)
-        .then(|| sql_name.catalog_name().to_string())
+    crate::runtime::normalize_catalog_name(Some(sql_name.catalog_name())).map(ToString::to_string)
 }
 
 /// Collect typed table function metadata for the active runtime.
@@ -1715,7 +1714,7 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
-    use coral_spec::ManifestInputKind;
+    use coral_spec::{ManifestInputKind, SqlObjectName};
     use datafusion::datasource::TableProvider as _;
     use datafusion::error::DataFusionError;
     use datafusion::prelude::{SessionContext, col, lit};
@@ -1732,9 +1731,16 @@ mod tests {
     use super::{
         CatalogColumnFetchFailures, ColumnPins, PinColumn, build_columns_table,
         build_columns_table_with_failures, catalog_filter_rows, catalog_input_rows,
-        collect_static_tables, collect_table_functions, column_pin, source_catalog_column_rows,
-        string_array,
+        collect_static_tables, collect_table_functions, column_pin, registered_catalog_name,
+        source_catalog_column_rows, string_array,
     };
+
+    #[test]
+    fn registered_catalog_name_folds_default_catalog_case() {
+        let sql_name = SqlObjectName::new("DataFusion", "github", "issues");
+
+        assert_eq!(registered_catalog_name(&sql_name), None);
+    }
 
     #[derive(Clone, Debug)]
     enum FetchOutcome {

@@ -184,6 +184,7 @@ impl HttpCompiledSource {
         for (sql_name, table) in self.catalog.table_relations() {
             let provider: Arc<dyn TableProvider> = Arc::new(HttpSourceTableProvider::new(
                 backend.clone(),
+                &self.source_name,
                 sql_name.clone(),
                 table.clone(),
                 Arc::clone(&self.source_observation_publishers),

@@ -12,7 +12,7 @@ use crate::backends::{
     BackendRegistrationContext, CatalogColumnFetcher, CatalogPreparation, CatalogPublication,
     CatalogRegistration, CompiledBackendCatalog, RegisteredSource,
 };
-use crate::runtime::error::{datafusion_to_core, source_decorator_error_to_core};
+use crate::runtime::error::{datafusion_to_core, named_source_decorator_error_to_core};
 use crate::{CoreError, QuerySource, SourceDecorator, SourceFailurePolicy};
 
 /// Source SQL names the runtime owns. Mirrored by `RESERVED_SOURCE_SCHEMA_NAMES`
@@ -266,19 +266,21 @@ fn publish_catalog_registrations(
         .iter()
         .filter(|registration| registration.publication == CatalogPublication::ExtendExisting)
     {
-        let target = ctx.catalog(&registration.catalog_name).ok_or_else(|| {
-            CoreError::FailedPrecondition(format!(
+        let Some(target) = ctx.catalog(&registration.catalog_name) else {
+            rollback_registered_schemas(&published_schemas);
+            return Err(CoreError::FailedPrecondition(format!(
                 "catalog '{}' is not installed",
                 registration.catalog_name
-            ))
-        })?;
+            )));
+        };
         for schema_name in registration.provider.schema_names() {
-            let schema = registration.provider.schema(&schema_name).ok_or_else(|| {
-                CoreError::internal(format!(
+            let Some(schema) = registration.provider.schema(&schema_name) else {
+                rollback_registered_schemas(&published_schemas);
+                return Err(CoreError::internal(format!(
                     "prepared catalog '{}' omitted schema '{schema_name}'",
                     registration.catalog_name
-                ))
-            })?;
+                )));
+            };
             if let Err(error) = target.register_schema(&schema_name, schema) {
                 rollback_registered_schemas(&published_schemas);
                 return Err(datafusion_to_core(&error, &[]));
@@ -411,7 +413,7 @@ fn prepare_source_decorators(
     for decorator in source_decorators {
         decorator
             .prepare(selected_sources)
-            .map_err(|error| source_decorator_error(decorator.name(), &error))?;
+            .map_err(|error| named_source_decorator_error_to_core(decorator.name(), &error))?;
     }
     Ok(())
 }
@@ -425,7 +427,7 @@ fn handle_source_registration_failure(
         let policy = decorator
             .source_failed(source, error)
             .map_err(|decorator_error| {
-                source_decorator_error(decorator.name(), &decorator_error)
+                named_source_decorator_error_to_core(decorator.name(), &decorator_error)
             })?;
         if policy == SourceFailurePolicy::Abort {
             return Ok(true);
@@ -440,36 +442,86 @@ fn finish_source_decorators(
     for decorator in source_decorators {
         decorator
             .finish()
-            .map_err(|error| source_decorator_error(decorator.name(), &error))?;
+            .map_err(|error| named_source_decorator_error_to_core(decorator.name(), &error))?;
     }
     Ok(())
-}
-
-fn source_decorator_error(name: &str, error: &crate::SourceDecoratorError) -> CoreError {
-    let core = source_decorator_error_to_core(error);
-    match core {
-        CoreError::InvalidInput(detail) => {
-            CoreError::InvalidInput(format!("source decorator '{name}': {detail}"))
-        }
-        CoreError::FailedPrecondition(detail) => {
-            CoreError::FailedPrecondition(format!("source decorator '{name}': {detail}"))
-        }
-        other => other,
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::Arc;
 
     use coral_spec::{SqlObjectName, parse_source_manifest_yaml};
+    use datafusion::catalog::{CatalogProvider, MemorySchemaProvider, SchemaProvider};
+    use datafusion::prelude::SessionContext;
 
+    use crate::backends::{
+        CatalogPublication, CatalogRegistration, RegisteredSource, SourceQualifiedName,
+    };
     use crate::{
         CoreError, HttpRuntimeBackend, HttpRuntimeCatalog, HttpRuntimeRelation, QuerySource,
         RuntimeSourcePackage,
     };
 
-    use super::{check_reserved_schema, validate_selected_source_names};
+    use super::{
+        SourceRegistrationResult, check_reserved_schema, publish_catalog_registrations,
+        validate_selected_source_names,
+    };
+
+    #[derive(Debug)]
+    struct MissingSecondSchemaCatalog {
+        first: Arc<dyn SchemaProvider>,
+    }
+
+    impl CatalogProvider for MissingSecondSchemaCatalog {
+        fn schema_names(&self) -> Vec<String> {
+            vec!["published_first".to_string(), "missing_second".to_string()]
+        }
+
+        fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
+            (name == "published_first").then(|| Arc::clone(&self.first))
+        }
+    }
+
+    #[test]
+    fn publication_rolls_back_schemas_when_prepared_schema_is_missing() {
+        let ctx = SessionContext::new();
+        let default_catalog = ctx.catalog("datafusion").expect("default catalog");
+        let mut seen_schemas = default_catalog.schema_names().into_iter().collect();
+        let mut seen_catalogs = ctx.catalog_names().into_iter().collect();
+        let mut result = SourceRegistrationResult::default();
+        let registration = CatalogRegistration {
+            catalog_name: "datafusion".to_string(),
+            publication: CatalogPublication::ExtendExisting,
+            provider: Arc::new(MissingSecondSchemaCatalog {
+                first: Arc::new(MemorySchemaProvider::new()),
+            }),
+            source: RegisteredSource {
+                source_name: "rollback_source".to_string(),
+                qualified_name: SourceQualifiedName::Schema("rollback_source".to_string()),
+                tables: Vec::new(),
+                table_functions: Vec::new(),
+                inputs: Vec::new(),
+            },
+            column_fetcher: None,
+        };
+
+        let error = publish_catalog_registrations(
+            &ctx,
+            &mut seen_schemas,
+            &mut seen_catalogs,
+            vec![registration],
+            &mut result,
+        )
+        .expect_err("missing prepared schema should fail publication");
+
+        assert!(error.to_string().contains("missing_second"));
+        assert!(
+            default_catalog.schema("published_first").is_none(),
+            "the schema published before the failure must be rolled back"
+        );
+    }
 
     #[test]
     fn reserved_schema_coral_is_rejected() {

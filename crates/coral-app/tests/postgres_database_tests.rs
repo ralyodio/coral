@@ -91,24 +91,34 @@ async fn postgres_discovered_catalog_uses_canonical_sql_and_remote_columns_with_
         postgres_source(&database_url),
     ];
 
-    let result = CoralQuery::execute_sql(
-        &sources,
-        QueryRuntimeConfig::default(),
-        "SELECT display_name FROM postgres_inventory.coral_inventory.column_types WHERE id = 1",
-    )
-    .await
-    .expect("query canonical Postgres table while another source fails");
+    let runtime = CoralQuery::prepare(&sources, QueryRuntimeConfig::default())
+        .await
+        .expect("prepare one runtime while isolating the broken source");
+    let broken_error = runtime
+        .execute_sql("SELECT * FROM broken_postgres.public.unreachable")
+        .await
+        .expect_err("broken Postgres catalog should remain unavailable");
+    assert!(
+        broken_error.to_string().contains("broken_postgres"),
+        "broken source error should preserve its identity: {broken_error}"
+    );
+
+    let result = runtime
+        .execute_sql(
+            "SELECT display_name FROM postgres_inventory.coral_inventory.column_types WHERE id = 1",
+        )
+        .await
+        .expect("query canonical Postgres table in the same runtime");
     assert_eq!(result.row_count(), 1);
 
-    let tables = CoralQuery::list_tables(
-        &sources,
-        QueryRuntimeConfig::default(),
-        Some("postgres_inventory"),
-        Some("coral_inventory"),
-        Some("column_types"),
-    )
-    .await
-    .expect("read Postgres column inventory through coral.columns");
+    let tables = runtime
+        .list_tables(
+            Some("postgres_inventory"),
+            Some("coral_inventory"),
+            Some("column_types"),
+        )
+        .await
+        .expect("read Postgres column inventory through the same runtime");
 
     assert_eq!(tables.len(), 1);
     let table = tables.first().expect("inventory fixture table");

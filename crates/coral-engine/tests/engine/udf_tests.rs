@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -6,19 +6,21 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use arrow::datatypes::{DataType, Schema};
 use arrow::record_batch::RecordBatch;
 use coral_engine::{
-    CoralQuery, CoreError, EngineExtensions, HttpRuntimeBackend, HttpRuntimeCatalog,
-    HttpRuntimeRelation, QueryExecutionProvenance, QueryParameterValue, QueryParameters,
-    QueryResultObserver, QueryResultObserverError, QueryRuntimeConfig, QueryRuntimeContext,
-    QuerySource, RuntimeSourcePackage, StatusCode, UdfRuntimeArgument, UdfRuntimeDefinition,
-    UdfRuntimeImplementation, UdfRuntimePublish, UdfRuntimeResultColumn, UdfRuntimeSignature,
-    UdfRuntimeSqlDefinition, UdfRuntimeTableFunctionPublish,
+    CoralQuery, CoreError, EngineExtensions, QueryExecutionProvenance, QueryParameterValue,
+    QueryParameters, QueryResultObserver, QueryResultObserverError, QueryRuntimeConfig,
+    QueryRuntimeContext, QuerySource, RuntimeSourcePackage, StatusCode, UdfRuntimeArgument,
+    UdfRuntimeDefinition, UdfRuntimeImplementation, UdfRuntimePublish, UdfRuntimeResultColumn,
+    UdfRuntimeSignature, UdfRuntimeSqlDefinition, UdfRuntimeTableFunctionPublish,
 };
-use coral_spec::{ManifestDataType, SqlObjectName, parse_source_manifest_value};
+use coral_spec::ManifestDataType;
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use crate::harness::{build_source, dir_url, execution_to_rows, test_runtime, write_jsonl_file};
+use crate::harness::{
+    build_source, build_v4_http_function_source, dir_url, execution_to_rows, test_runtime,
+    write_jsonl_file,
+};
 
 const EVENTS_CALL: &str = "select * from udfs.min_id_events(min_id => 1)";
 const REVIEW_QUERY: &str = "repo:withcoral/coral review";
@@ -163,39 +165,13 @@ fn search_source(server: &MockServer, source_name: &str) -> coral_engine::QueryS
 }
 
 fn v4_search_source(server: &MockServer, catalog_name: &str, schema_name: &str) -> QuerySource {
-    let mut manifest =
-        parse_source_manifest_value(search_function_manifest(catalog_name, &server.uri()))
-            .expect("HTTP manifest")
-            .as_http()
-            .expect("HTTP source")
-            .clone();
-    manifest.common.dsl_version = 4;
-    let function = manifest.functions.first().expect("search function").clone();
-    let relation = HttpRuntimeRelation::try_table_function(
-        SqlObjectName::new(catalog_name, schema_name, &function.name),
-        function,
-    )
-    .expect("runtime relation");
-    let catalog = HttpRuntimeCatalog::try_new(
+    build_v4_http_function_source(
+        search_function_manifest(catalog_name, &server.uri()),
         catalog_name,
-        HttpRuntimeBackend::from_manifest(&manifest),
-        vec![relation],
+        schema_name,
+        None,
+        None,
     )
-    .expect("runtime catalog");
-    QuerySource::from_runtime_catalog(
-        RuntimeSourcePackage {
-            source_name: catalog_name.to_string(),
-            authored_version: None,
-            description: String::new(),
-            declared_inputs: Vec::new(),
-            test_queries: Vec::new(),
-            identity_requirements: None,
-            catalog: Some(catalog.into()),
-        },
-        BTreeMap::new(),
-        BTreeMap::new(),
-    )
-    .expect("runtime source")
 }
 
 fn events_source(source_name: &str) -> (tempfile::TempDir, coral_engine::QuerySource) {
@@ -1126,8 +1102,8 @@ async fn udf_table_function_can_share_schema_and_name_with_v4_source_function() 
         .table_functions
         .iter()
         .map(|function| function.catalog_name.as_deref())
-        .collect::<Vec<_>>();
-    assert_eq!(catalogs, [None, Some("github_v4")]);
+        .collect::<BTreeSet<_>>();
+    assert_eq!(catalogs, BTreeSet::from([None, Some("github_v4")]));
 }
 
 #[tokio::test]

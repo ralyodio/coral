@@ -28,8 +28,7 @@ use crate::backends::{BoundSourceFunctionArg, SourceFunctionProviderFactory};
 use coral_spec::SqlObjectName;
 
 struct FunctionCallContext<'a> {
-    source_schema: &'a str,
-    function_name: &'a str,
+    sql_name: &'a SqlObjectName,
 }
 
 /// Immutable execution state shared by every invocation of one registered HTTP
@@ -86,7 +85,7 @@ impl SourceFunctionProviderFactory for HttpSourceTableFunction {
     }
 
     fn provider_for_args(&self, args: &[BoundSourceFunctionArg]) -> Result<Arc<dyn TableProvider>> {
-        let arg_values = bind_function_args(self.state.sql_name.schema_name(), &self.spec, args)?;
+        let arg_values = bind_function_args(&self.state.sql_name, &self.spec, args)?;
         Ok(Arc::new(HttpSourceFunctionCallTableProvider {
             state: Arc::clone(&self.state),
             arg_values,
@@ -158,14 +157,11 @@ impl TableProvider for HttpSourceFunctionCallTableProvider {
 }
 
 fn bind_function_args(
-    source_schema: &str,
+    sql_name: &SqlObjectName,
     function: &SourceTableFunctionSpec,
     args: &[BoundSourceFunctionArg],
 ) -> Result<HashMap<String, String>> {
-    let context = FunctionCallContext {
-        source_schema,
-        function_name: function.name.as_str(),
-    };
+    let context = FunctionCallContext { sql_name };
     ensure_no_extra_args(&context, function.args.len(), args.len())?;
 
     let mut required_missing = Vec::new();
@@ -194,9 +190,8 @@ fn bind_function_args(
 
     if !required_missing.is_empty() {
         return Err(DataFusionError::Plan(format!(
-            "{}.{} missing required argument(s): {}",
-            context.source_schema,
-            context.function_name,
+            "{} missing required argument(s): {}",
+            context.sql_name,
             required_missing.join(", ")
         )));
     }
@@ -211,8 +206,8 @@ fn ensure_no_extra_args(
 ) -> Result<()> {
     if actual > expected {
         return Err(DataFusionError::Plan(format!(
-            "{}.{} expected at most {} arguments, got {}",
-            context.source_schema, context.function_name, expected, actual
+            "{} expected at most {} arguments, got {}",
+            context.sql_name, expected, actual
         )));
     }
     Ok(())
@@ -226,9 +221,8 @@ fn ensure_call_arg_allowed_value(
 ) -> Result<()> {
     if !allowed_values.is_empty() && !allowed_values.iter().any(|allowed| allowed == value) {
         return Err(DataFusionError::Plan(format!(
-            "{}.{} argument '{arg}' has invalid value '{value}'; expected one of: {}",
-            context.source_schema,
-            context.function_name,
+            "{} argument '{arg}' has invalid value '{value}'; expected one of: {}",
+            context.sql_name,
             allowed_values.join(", ")
         )));
     }

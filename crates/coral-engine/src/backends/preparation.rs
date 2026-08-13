@@ -10,7 +10,7 @@ use datafusion::datasource::TableProvider;
 use crate::backends::{
     CatalogRegistration, DiscoveredCatalogDraft, SourceQualifiedName, StaticCatalogDraft,
 };
-use crate::runtime::error::{datafusion_to_core, source_decorator_error_to_core};
+use crate::runtime::error::{datafusion_to_core, named_source_decorator_error_to_core};
 use crate::runtime::schema_provider::StaticSchemaProvider;
 use crate::{CoreError, QuerySource, SourceDecorator, SourceTables};
 
@@ -38,11 +38,11 @@ impl<'a> CatalogPreparation<'a> {
     }
 
     pub(crate) fn stage_static(&mut self, draft: StaticCatalogDraft) -> Result<(), CoreError> {
-        if let Some(sql_name) = draft
-            .tables
-            .keys()
-            .find(|sql_name| sql_name.catalog_name() != draft.target.catalog_name)
-        {
+        if let Some(sql_name) = draft.tables.keys().find(|sql_name| {
+            !sql_name
+                .catalog_name()
+                .eq_ignore_ascii_case(&draft.target.catalog_name)
+        }) {
             return Err(CoreError::InvalidInput(format!(
                 "static catalog '{}' contains table identity '{sql_name}'",
                 draft.target.catalog_name
@@ -88,7 +88,7 @@ impl<'a> CatalogPreparation<'a> {
         for decorator in self.decorators.iter_mut() {
             tables = decorator
                 .decorate_source(self.source, tables)
-                .map_err(|error| source_decorator_error(decorator.name(), &error))?;
+                .map_err(|error| named_source_decorator_error_to_core(decorator.name(), &error))?;
             let decorated_identities = tables
                 .iter()
                 .map(|(name, _)| name.clone())
@@ -162,17 +162,4 @@ fn assemble_static_provider(
             .map_err(|error| datafusion_to_core(&error, &[]))?;
     }
     Ok(provider)
-}
-
-fn source_decorator_error(name: &str, error: &crate::SourceDecoratorError) -> CoreError {
-    let core = source_decorator_error_to_core(error);
-    match core {
-        CoreError::InvalidInput(detail) => {
-            CoreError::InvalidInput(format!("source decorator '{name}': {detail}"))
-        }
-        CoreError::FailedPrecondition(detail) => {
-            CoreError::FailedPrecondition(format!("source decorator '{name}': {detail}"))
-        }
-        other => other,
-    }
 }

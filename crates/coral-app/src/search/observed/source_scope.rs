@@ -1,6 +1,6 @@
 //! Source-surface routing and opaque scope derivation for observed values.
 
-use coral_engine::{QuerySource, RuntimeCatalog, StaticRuntimeCatalog};
+use coral_engine::{QuerySource, RuntimeRelationKind};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -95,43 +95,33 @@ pub(super) fn source_surface_scopes(
 ) -> Result<Vec<ObservedSourceSurfaceScope>, ObservedSourceIdentityMismatch> {
     let source_name = source.source_name();
     let mut scopes = Vec::new();
-    let mut push_relation = |sql_name: &coral_spec::SqlObjectName, is_table_function: bool| {
-        if sql_name.schema_name() != source_name {
-            return Err(ObservedSourceIdentityMismatch {
-                source_name: source_name.to_string(),
-                component_source_name: sql_name.schema_name().to_string(),
-            });
-        }
-        scopes.push(surface_scope(
-            source_name,
-            if is_table_function {
-                ObservedValuesSurfaceKind::Function
-            } else {
-                ObservedValuesSurfaceKind::Table
-            },
-            sql_name.name(),
-            seed,
-        ));
-        Ok(())
-    };
-
-    match source.catalog() {
-        None | Some(RuntimeCatalog::Discovered(_)) => {}
-        Some(RuntimeCatalog::Static(StaticRuntimeCatalog::Http(catalog))) => {
-            for relation in catalog.relations() {
-                push_relation(relation.sql_name(), relation.is_table_function())?;
+    let mut mismatch = None;
+    if let Some(catalog) = source.catalog() {
+        catalog.for_each_declared_relation(|sql_name, kind| {
+            if mismatch.is_some() {
+                return;
             }
-        }
-        Some(RuntimeCatalog::Static(StaticRuntimeCatalog::File(catalog))) => {
-            for relation in catalog.relations() {
-                push_relation(relation.sql_name(), false)?;
+            if sql_name.schema_name() != source_name {
+                mismatch = Some(ObservedSourceIdentityMismatch {
+                    source_name: source_name.to_string(),
+                    component_source_name: sql_name.schema_name().to_string(),
+                });
+                return;
             }
-        }
-        Some(RuntimeCatalog::Static(StaticRuntimeCatalog::Mcp(catalog))) => {
-            for relation in catalog.relations() {
-                push_relation(relation.sql_name(), relation.is_table_function())?;
-            }
-        }
+            scopes.push(surface_scope(
+                source_name,
+                if kind == RuntimeRelationKind::TableFunction {
+                    ObservedValuesSurfaceKind::Function
+                } else {
+                    ObservedValuesSurfaceKind::Table
+                },
+                sql_name.name(),
+                seed,
+            ));
+        });
+    }
+    if let Some(mismatch) = mismatch {
+        return Err(mismatch);
     }
     Ok(scopes)
 }

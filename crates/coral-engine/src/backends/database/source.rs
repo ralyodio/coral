@@ -26,7 +26,7 @@ use crate::backends::shared::template::{RenderContext, render_template};
 use crate::backends::{
     BackendCompileRequest, BackendRegistrationContext, CatalogPreparation, CatalogTarget,
     CompiledBackendCatalog, DiscoveredCatalogDraft, RegisteredSource, RegisteredTable,
-    SourceQualifiedName, build_registered_inputs,
+    build_registered_inputs,
 };
 use crate::runtime::error::datafusion_to_core;
 
@@ -410,9 +410,10 @@ fn registered_source_for_catalog(
     relations: &[DatabaseRelation],
 ) -> RegisteredSource {
     let secret_keys = source_secrets.keys().cloned().collect::<BTreeSet<_>>();
+    let target = CatalogTarget::new(catalog_name);
     RegisteredSource {
         source_name: source_name.to_string(),
-        qualified_name: SourceQualifiedName::Catalog(catalog_name.to_string()),
+        qualified_name: target.source_qualified_name(source_name),
         tables: database_relation_inventory(catalog_name, relations),
         table_functions: Vec::new(),
         inputs: build_registered_inputs(declared_inputs, source_variables, &secret_keys),
@@ -457,9 +458,10 @@ mod tests {
 
     use super::{
         DatabaseCatalogStrategy, MYSQL_INVENTORY_RECOGNIZED_DATA_TYPES,
-        MYSQL_INVENTORY_SESSION_SQL, mysql_relations_sql,
+        MYSQL_INVENTORY_SESSION_SQL, mysql_relations_sql, registered_source_for_catalog,
     };
     use crate::backends::shared::template::RenderContext;
+    use crate::backends::{CatalogTarget, SourceQualifiedName};
     use crate::{
         CoralQuery, DatabaseRuntimeBackend, DatabaseRuntimeCatalog, QueryRuntimeConfig,
         QuerySource, RuntimeSourcePackage, SourceDecorator, SourceDecoratorError,
@@ -552,6 +554,25 @@ mod tests {
             MYSQL_INVENTORY_SESSION_SQL,
             "SET SESSION group_concat_max_len = 1048576"
         );
+    }
+
+    #[test]
+    fn explicit_default_catalog_uses_source_schema_qualification() {
+        for catalog_name in ["datafusion", "DataFusion"] {
+            assert_eq!(CatalogTarget::new(catalog_name).catalog_name, "datafusion");
+            let source = registered_source_for_catalog(
+                "github",
+                catalog_name,
+                &[],
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &[],
+            );
+            assert!(matches!(
+                source.qualified_name,
+                SourceQualifiedName::Schema(ref schema_name) if schema_name == "github"
+            ));
+        }
     }
 
     fn sqlite_source(path: String) -> QuerySource {

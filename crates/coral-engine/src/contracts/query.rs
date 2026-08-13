@@ -723,7 +723,12 @@ fn validate_declared_relation_names<'a>(
                 sql_name.catalog_name()
             )));
         }
-        if !names.insert(sql_name.clone()) {
+        let normalized_name = (
+            sql_name.catalog_name().to_ascii_lowercase(),
+            sql_name.schema_name().to_ascii_lowercase(),
+            sql_name.name().to_ascii_lowercase(),
+        );
+        if !names.insert(normalized_name) {
             return Err(crate::CoreError::InvalidInput(format!(
                 "runtime catalog '{catalog_name}' declares duplicate relation '{sql_name}'"
             )));
@@ -901,7 +906,10 @@ impl QuerySource {
         let Some(catalog) = &self.catalog else {
             return vec![self.source_name()];
         };
-        if catalog.catalog_name() != crate::runtime::DATAFUSION_DEFAULT_CATALOG {
+        if !catalog
+            .catalog_name()
+            .eq_ignore_ascii_case(crate::runtime::DATAFUSION_DEFAULT_CATALOG)
+        {
             return names;
         }
         match catalog {
@@ -946,7 +954,7 @@ impl QuerySource {
             return Vec::new();
         };
         let name = catalog.catalog_name();
-        if name == crate::runtime::DATAFUSION_DEFAULT_CATALOG {
+        if name.eq_ignore_ascii_case(crate::runtime::DATAFUSION_DEFAULT_CATALOG) {
             Vec::new()
         } else {
             vec![name]
@@ -1965,9 +1973,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        HttpRuntimeCatalog, MemorySize, QuerySource, RuntimeCatalog, RuntimeSourcePackage,
-        StaticRuntimeCatalog,
+        HttpRuntimeBackend, HttpRuntimeCatalog, HttpRuntimeRelation, MemorySize, QuerySource,
+        RuntimeCatalog, RuntimeSourcePackage, StaticRuntimeCatalog,
     };
+    use coral_spec::SqlObjectName;
 
     #[test]
     fn memory_size_parses_binary_units() {
@@ -1994,6 +2003,53 @@ mod tests {
                 "{raw:?} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn runtime_catalog_rejects_case_insensitive_table_function_collision() {
+        let manifest = parse_source_manifest_value(json!({
+            "dsl_version": 3,
+            "name": "github",
+            "version": "1.0.0",
+            "backend": "http",
+            "base_url": "https://api.example.com",
+            "tables": [{
+                "name": "table_source",
+                "description": "Table",
+                "request": { "path": "/table" },
+                "columns": [{ "name": "id", "type": "Utf8" }]
+            }],
+            "functions": [{
+                "name": "function_source",
+                "description": "Function",
+                "args": [],
+                "request": { "path": "/function" },
+                "columns": [{ "name": "id", "type": "Utf8" }]
+            }]
+        }))
+        .expect("manifest");
+        let manifest = manifest.as_http().expect("HTTP manifest");
+        let relations = vec![
+            HttpRuntimeRelation::try_table(
+                SqlObjectName::new("github_v4", "Issues", "Lookup"),
+                manifest.tables.first().expect("table").clone(),
+            )
+            .expect("runtime table"),
+            HttpRuntimeRelation::try_table_function(
+                SqlObjectName::new("github_v4", "issues", "lookup"),
+                manifest.functions.first().expect("function").clone(),
+            )
+            .expect("runtime function"),
+        ];
+
+        let error = HttpRuntimeCatalog::try_new(
+            "github_v4",
+            HttpRuntimeBackend::from_manifest(manifest),
+            relations,
+        )
+        .expect_err("unquoted SQL coordinates must collide case-insensitively");
+
+        assert!(error.to_string().contains("duplicate relation"));
     }
 
     #[test]

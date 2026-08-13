@@ -6,8 +6,9 @@ use crate::runtime::catalog;
 use crate::runtime::registry::{CompiledQuerySource, register_sources_blocking};
 use crate::runtime::source_functions::SourceFunctionRegistry;
 use crate::{
-    QuerySource, SourceInputResolutionContext, SourceInputResolver, SourceInputResolverError,
-    SourceObservationPublisher, SourceObservationSurfaceKind,
+    QuerySource, RuntimeCatalog, RuntimeSourcePackage, SourceInputResolutionContext,
+    SourceInputResolver, SourceInputResolverError, SourceObservationPublisher,
+    SourceObservationSurfaceKind, StaticRuntimeCatalog,
 };
 use datafusion::arrow::array::StringArray;
 use datafusion::arrow::util::pretty::pretty_format_batches;
@@ -325,25 +326,41 @@ fn compile_sources(
 }
 
 fn compile_sources_with_mcp_manifest(
-    source_manifest: coral_spec::ValidatedSourceManifest,
     mcp_manifest: &coral_spec::backends::mcp::McpSourceManifest,
     caller: Arc<dyn McpToolCaller>,
 ) -> Vec<CompiledQuerySource> {
     let catalog = crate::McpRuntimeCatalog::try_from_default_catalog_manifest(mcp_manifest.clone())
         .expect("validated MCP manifest produces a valid runtime catalog");
-    let source_name = mcp_manifest.common.name.clone();
-    let source = QuerySource::new(source_manifest, BTreeMap::new(), BTreeMap::new());
+    let source = QuerySource::from_runtime_catalog(
+        RuntimeSourcePackage {
+            source_name: mcp_manifest.common.name.clone(),
+            authored_version: Some(mcp_manifest.common.version.clone()),
+            description: mcp_manifest.common.description.clone(),
+            declared_inputs: mcp_manifest.declared_inputs.clone(),
+            test_queries: mcp_manifest.common.test_queries.clone(),
+            identity_requirements: None,
+            catalog: Some(catalog.into()),
+        },
+        BTreeMap::new(),
+        BTreeMap::new(),
+    )
+    .expect("runtime source package");
+    let RuntimeCatalog::Static(StaticRuntimeCatalog::Mcp(catalog)) =
+        source.catalog().expect("source-owned runtime catalog")
+    else {
+        panic!("expected MCP runtime catalog");
+    };
     let source_input_resolution = SourceInputResolutionContext::from_query_source(&source);
     let resolved_inputs = Arc::new(coral_spec::resolve_inputs(
-        &mcp_manifest.declared_inputs,
+        source_input_resolution.declared_inputs(),
         source_input_resolution.secrets(),
         source_input_resolution.variables(),
     ));
     let source_inputs = Arc::new(McpSourceInputs::static_inputs(resolved_inputs));
     let compiled = compile_source_with_caller(
         McpCompiledSourceConfig {
-            source_name,
-            catalog,
+            source_name: source.source_name().to_string(),
+            catalog: catalog.clone(),
             source_input_resolution,
             source_inputs,
         },
@@ -1452,10 +1469,8 @@ async fn limit_binding_omits_arg_when_no_limit_set() {
     );
 }
 
-fn mcp_table_with_generated_offset_pagination_manifest() -> (
-    coral_spec::ValidatedSourceManifest,
-    coral_spec::backends::mcp::McpSourceManifest,
-) {
+fn mcp_table_with_generated_offset_pagination_manifest()
+-> coral_spec::backends::mcp::McpSourceManifest {
     let source_manifest = coral_spec::parse_source_manifest_value(json!({
         "dsl_version": 3,
         "name": "test_mcp",
@@ -1485,7 +1500,7 @@ fn mcp_table_with_generated_offset_pagination_manifest() -> (
         offset_start: 0,
         max_pages: Some(5),
     });
-    (source_manifest, mcp_manifest)
+    mcp_manifest
 }
 
 #[tokio::test]
@@ -1494,10 +1509,10 @@ async fn generated_offset_pagination_pushes_limit_and_offset_pages() {
     let caller = Arc::new(FakeOffsetPaginatedMcpTableCaller {
         calls: Mutex::new(Vec::new()),
     });
-    let (source_manifest, mcp_manifest) = mcp_table_with_generated_offset_pagination_manifest();
+    let mcp_manifest = mcp_table_with_generated_offset_pagination_manifest();
     register_test_sources(
         &ctx,
-        compile_sources_with_mcp_manifest(source_manifest, &mcp_manifest, caller.clone()),
+        compile_sources_with_mcp_manifest(&mcp_manifest, caller.clone()),
     );
 
     let batches = ctx

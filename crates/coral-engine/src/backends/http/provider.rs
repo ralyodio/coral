@@ -31,6 +31,7 @@ use coral_spec::backends::http::HttpTableSpec;
 /// Table provider that exposes one manifest-defined HTTP table to `DataFusion`.
 pub(crate) struct HttpSourceTableProvider {
     backend: HttpSourceClient,
+    source_name: String,
     sql_name: SqlObjectName,
     table: Arc<HttpTableSpec>,
     target: HttpFetchTarget,
@@ -55,6 +56,7 @@ impl HttpSourceTableProvider {
     /// is invalid.
     pub(crate) fn new(
         backend: HttpSourceClient,
+        source_name: impl Into<String>,
         sql_name: SqlObjectName,
         table: HttpTableSpec,
         source_observation_publishers: SourceObservationPublishers,
@@ -63,6 +65,7 @@ impl HttpSourceTableProvider {
         let target = HttpFetchTarget::from_resolved_table_request(&table, table.request.clone());
         Ok(Self {
             backend,
+            source_name: source_name.into(),
             sql_name,
             table: Arc::new(table),
             target,
@@ -71,8 +74,8 @@ impl HttpSourceTableProvider {
         })
     }
 
-    pub(crate) fn source_schema(&self) -> &str {
-        self.sql_name.schema_name()
+    pub(crate) fn source_name(&self) -> &str {
+        &self.source_name
     }
 
     pub(crate) fn client(&self) -> &HttpSourceClient {
