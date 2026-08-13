@@ -13,7 +13,7 @@ use crate::runtime::dependent_join::error::DependentJoinError;
 #[derive(Clone)]
 pub(crate) struct BindingFetcher {
     client: HttpSourceClient,
-    source_schema: Arc<str>,
+    source_name: Arc<str>,
     table: Arc<HttpTableSpec>,
     binding_filters: Arc<[String]>,
     literal_filters: Arc<BTreeMap<String, String>>,
@@ -24,7 +24,7 @@ pub(crate) struct BindingFetcher {
 
 pub(crate) struct BindingFetcherConfig {
     pub(crate) client: HttpSourceClient,
-    pub(crate) source_schema: String,
+    pub(crate) source_name: String,
     pub(crate) table: Arc<HttpTableSpec>,
     pub(crate) binding_filters: Arc<[String]>,
     pub(crate) literal_filters: Arc<BTreeMap<String, String>>,
@@ -39,7 +39,7 @@ impl BindingFetcher {
 
         Self {
             client: config.client,
-            source_schema: Arc::from(config.source_schema),
+            source_name: Arc::from(config.source_name),
             table: config.table,
             binding_filters: config.binding_filters,
             literal_filters: config.literal_filters,
@@ -74,7 +74,7 @@ impl BindingFetcher {
 
         if rows.len() > self.max_rows_per_binding {
             return Err(DependentJoinError::RowsPerBinding {
-                source_schema: self.source_schema.to_string(),
+                source_name: self.source_name.to_string(),
                 table: self.table.name().to_string(),
                 observed: rows.len(),
                 cap: self.max_rows_per_binding,

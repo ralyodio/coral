@@ -34,7 +34,7 @@ use crate::runtime::memory::{RetainedMemory, RetainedRecordBatches};
 pub(crate) struct DependentJoinExec {
     resolver: Arc<dyn ExecutionPlan>,
     dependent: HttpSourceClient,
-    dependent_source_schema: String,
+    source_name: String,
     dependent_sql_name: coral_spec::SqlObjectName,
     table: Arc<HttpTableSpec>,
     binding_keys: Arc<[BindingKey]>,
@@ -57,7 +57,7 @@ pub(crate) struct DependentJoinExec {
 pub(crate) struct DependentJoinExecConfig {
     pub(crate) resolver: Arc<dyn ExecutionPlan>,
     pub(crate) dependent: HttpSourceClient,
-    pub(crate) dependent_source_schema: String,
+    pub(crate) source_name: String,
     pub(crate) dependent_sql_name: coral_spec::SqlObjectName,
     pub(crate) table: Arc<HttpTableSpec>,
     pub(crate) binding_keys: Arc<[BindingKey]>,
@@ -85,7 +85,7 @@ impl DependentJoinExec {
         Self {
             resolver: config.resolver,
             dependent: config.dependent,
-            dependent_source_schema: config.dependent_source_schema,
+            source_name: config.source_name,
             dependent_sql_name: config.dependent_sql_name,
             table: config.table,
             binding_keys: config.binding_keys,
@@ -112,7 +112,7 @@ impl DependentJoinExec {
         Self {
             resolver,
             dependent: self.dependent.clone(),
-            dependent_source_schema: self.dependent_source_schema.clone(),
+            source_name: self.source_name.clone(),
             dependent_sql_name: self.dependent_sql_name.clone(),
             table: Arc::clone(&self.table),
             binding_keys: Arc::clone(&self.binding_keys),
@@ -182,7 +182,7 @@ impl DependentJoinMetrics {
 impl fmt::Debug for DependentJoinExec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DependentJoinExec")
-            .field("source", &self.dependent_source_schema)
+            .field("source", &self.source_name)
             .field("table", &self.table.name())
             .finish_non_exhaustive()
     }
@@ -193,7 +193,7 @@ impl DisplayAs for DependentJoinExec {
         write!(
             f,
             "DependentJoinExec: table={}.{}, binding_keys={}, literal_filters={}, max_bindings={}, max_resolver_rows={}, max_rows_per_binding={}, max_resolver_rows_per_binding={}, max_concurrency={}, page_hint={}",
-            self.dependent_source_schema,
+            self.source_name,
             self.table.name(),
             format_binding_keys(&self.binding_keys),
             format_literal_filters(&self.literal_filters),
@@ -289,7 +289,7 @@ impl ExecutionPlan for DependentJoinExec {
             .output_partitioning()
             .partition_count();
         let dependent = self.dependent.clone();
-        let dependent_source_schema = self.dependent_source_schema.clone();
+        let source_name = self.source_name.clone();
         let dependent_sql_name = self.dependent_sql_name.clone();
         let table = Arc::clone(&self.table);
         let binding_keys = Arc::clone(&self.binding_keys);
@@ -302,7 +302,7 @@ impl ExecutionPlan for DependentJoinExec {
         let literal_filters = Arc::clone(&self.literal_filters);
         let dependent_first = self.dependent_first;
         let caps = ResolverCaps {
-            source_schema: dependent_source_schema.clone(),
+            source_name: source_name.clone(),
             table: table.name().to_string(),
             max_bindings: self.max_bindings,
             max_resolver_rows: self.max_resolver_rows,
@@ -321,7 +321,7 @@ impl ExecutionPlan for DependentJoinExec {
             context.as_ref(),
             format!(
                 "DependentJoinExec({}.{})",
-                self.dependent_source_schema,
+                self.source_name,
                 self.table.name()
             ),
         );
@@ -332,7 +332,7 @@ impl ExecutionPlan for DependentJoinExec {
                 resolver_partition_count,
                 context,
                 dependent,
-                dependent_source_schema,
+                source_name,
                 dependent_sql_name,
                 table,
                 binding_keys,
@@ -379,7 +379,7 @@ async fn execute_dependent_join(
     resolver_partition_count: usize,
     context: Arc<TaskContext>,
     dependent: HttpSourceClient,
-    dependent_source_schema: String,
+    source_name: String,
     dependent_sql_name: coral_spec::SqlObjectName,
     table: Arc<HttpTableSpec>,
     binding_keys: Arc<[BindingKey]>,
@@ -410,7 +410,7 @@ async fn execute_dependent_join(
 
     let fetcher = BindingFetcher::new(BindingFetcherConfig {
         client: dependent,
-        source_schema: dependent_source_schema.clone(),
+        source_name: source_name.clone(),
         table: Arc::clone(&table),
         binding_filters: Arc::from(binding_filters.clone()),
         literal_filters: Arc::clone(&literal_filters),
@@ -430,7 +430,7 @@ async fn execute_dependent_join(
     build_joined_batches(
         &BuildJoinedBatchesConfig {
             state: &state,
-            dependent_source_schema: &dependent_source_schema,
+            source_name: &source_name,
             dependent_table: &table,
             binding_filters: &binding_filters,
             literal_filters: &literal_filters,

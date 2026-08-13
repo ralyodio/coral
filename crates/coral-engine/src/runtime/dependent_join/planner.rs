@@ -37,7 +37,7 @@ impl ExtensionPlanner for DependentJoinExtensionPlanner {
         let exec = DependentJoinExec::new(DependentJoinExecConfig {
             resolver: Arc::clone(resolver),
             dependent: provider.client,
-            dependent_source_schema: provider.source_name,
+            source_name: provider.source_name,
             dependent_sql_name: provider.sql_name,
             table: provider.table,
             binding_keys: Arc::from(node.binding_keys.clone()),

@@ -14,7 +14,7 @@ const RESOLVER_ROWS_PER_BINDING_LIMIT_REASON: &str =
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ResolverRowsExceeded<'a> {
-    pub(crate) source_schema: &'a str,
+    pub(crate) source_name: &'a str,
     pub(crate) table: &'a str,
     pub(crate) observed: usize,
     pub(crate) cap: usize,
@@ -23,11 +23,11 @@ pub(crate) struct ResolverRowsExceeded<'a> {
 #[derive(Debug, Error)]
 pub(crate) enum DependentJoinError {
     #[error(
-        "Your query produced {observed} distinct combinations of join-key values for {source_schema}.{table} (matching on {}), but Coral is configured to push at most {cap} such combinations into the upstream API.",
+        "Your query produced {observed} distinct combinations of join-key values for {source_name}.{table} (matching on {}), but Coral is configured to push at most {cap} such combinations into the upstream API.",
         binding_filters.join(", ")
     )]
     Cardinality {
-        source_schema: String,
+        source_name: String,
         table: String,
         observed: usize,
         cap: usize,
@@ -35,30 +35,30 @@ pub(crate) enum DependentJoinError {
     },
 
     #[error(
-        "The side of the join that supplies keys for {source_schema}.{table} produced {observed} rows, but Coral is configured to inspect at most {cap} rows before deciding how to query the upstream API."
+        "The side of the join that supplies keys for {source_name}.{table} produced {observed} rows, but Coral is configured to inspect at most {cap} rows before deciding how to query the upstream API."
     )]
     ResolverRows {
-        source_schema: String,
+        source_name: String,
         table: String,
         observed: usize,
         cap: usize,
     },
 
     #[error(
-        "The upstream API for {source_schema}.{table} returned {observed} rows for one join-key combination, but Coral is configured to accept at most {cap} rows per upstream request."
+        "The upstream API for {source_name}.{table} returned {observed} rows for one join-key combination, but Coral is configured to accept at most {cap} rows per upstream request."
     )]
     RowsPerBinding {
-        source_schema: String,
+        source_name: String,
         table: String,
         observed: usize,
         cap: usize,
     },
 
     #[error(
-        "One join-key combination for {source_schema}.{table} matched {observed} rows on the key-supplying side of the join, but Coral is configured to allow at most {cap} rows for one combination."
+        "One join-key combination for {source_name}.{table} matched {observed} rows on the key-supplying side of the join, but Coral is configured to allow at most {cap} rows for one combination."
     )]
     ResolverRowsPerBinding {
-        source_schema: String,
+        source_name: String,
         table: String,
         observed: usize,
         cap: usize,
@@ -73,17 +73,17 @@ impl DependentJoinError {
     pub(crate) fn to_core_error(&self) -> CoreError {
         let (reason, summary, detail, hint, metadata) = match self {
             DependentJoinError::Cardinality {
-                source_schema,
+                source_name,
                 table,
                 observed,
                 cap,
                 binding_filters,
             } => {
-                let mut metadata = limit_metadata(source_schema, table, *observed, *cap);
+                let mut metadata = limit_metadata(source_name, table, *observed, *cap);
                 metadata.insert("binding_filters".to_string(), binding_filters.join(","));
                 (
                     BINDING_LIMIT_REASON,
-                    format!("Too many join-key combinations for {source_schema}.{table}"),
+                    format!("Too many join-key combinations for {source_name}.{table}"),
                     self.to_string(),
                     Some(format!(
                         "Narrow the WHERE clause on the other side of the join so fewer distinct \
@@ -95,29 +95,29 @@ impl DependentJoinError {
                 )
             }
             DependentJoinError::ResolverRows {
-                source_schema,
+                source_name,
                 table,
                 observed,
                 cap,
             } => (
                 RESOLVER_ROW_LIMIT_REASON,
-                format!("Too many key-supplying rows for {source_schema}.{table}"),
+                format!("Too many key-supplying rows for {source_name}.{table}"),
                 self.to_string(),
                 Some(
                     "Narrow the WHERE clause on the key-supplying side of the join, or ask your \
                      Coral operator to raise the dependent-join resolver-row limit."
                         .to_string(),
                 ),
-                limit_metadata(source_schema, table, *observed, *cap),
+                limit_metadata(source_name, table, *observed, *cap),
             ),
             DependentJoinError::RowsPerBinding {
-                source_schema,
+                source_name,
                 table,
                 observed,
                 cap,
             } => (
                 ROWS_PER_BINDING_LIMIT_REASON,
-                format!("Too many upstream rows for one {source_schema}.{table} join key"),
+                format!("Too many upstream rows for one {source_name}.{table} join key"),
                 self.to_string(),
                 Some(
                     "The upstream API returned more rows for one filter combination than Coral \
@@ -125,16 +125,16 @@ impl DependentJoinError {
                      route, or ask your Coral operator to raise the per-request row limit."
                         .to_string(),
                 ),
-                limit_metadata(source_schema, table, *observed, *cap),
+                limit_metadata(source_name, table, *observed, *cap),
             ),
             DependentJoinError::ResolverRowsPerBinding {
-                source_schema,
+                source_name,
                 table,
                 observed,
                 cap,
             } => (
                 RESOLVER_ROWS_PER_BINDING_LIMIT_REASON,
-                format!("One {source_schema}.{table} join key matched too many input rows"),
+                format!("One {source_name}.{table} join key matched too many input rows"),
                 self.to_string(),
                 Some(
                     "Reduce duplicate join-key rows on the key-supplying side of the join, for \
@@ -142,7 +142,7 @@ impl DependentJoinError {
                      to raise the per-key resolver-row limit."
                         .to_string(),
                 ),
-                limit_metadata(source_schema, table, *observed, *cap),
+                limit_metadata(source_name, table, *observed, *cap),
             ),
         };
 
@@ -159,13 +159,13 @@ impl DependentJoinError {
 }
 
 fn limit_metadata(
-    source_schema: &str,
+    source_name: &str,
     table: &str,
     observed: usize,
     cap: usize,
 ) -> HashMap<String, String> {
     HashMap::from([
-        ("source".to_string(), source_schema.to_string()),
+        ("source".to_string(), source_name.to_string()),
         ("table".to_string(), table.to_string()),
         ("observed".to_string(), observed.to_string()),
         ("limit".to_string(), cap.to_string()),
@@ -179,12 +179,12 @@ pub(crate) fn resolver_rows_exceeded(error: &DataFusionError) -> Option<Resolver
     let error = inner.downcast_ref::<DependentJoinError>()?;
     match error {
         DependentJoinError::ResolverRows {
-            source_schema,
+            source_name,
             table,
             observed,
             cap,
         } => Some(ResolverRowsExceeded {
-            source_schema,
+            source_name,
             table,
             observed: *observed,
             cap: *cap,
@@ -236,7 +236,7 @@ mod tests {
     fn cardinality_error_maps_to_structured_query_failure() {
         let metadata = assert_structured_limit_error(
             &DependentJoinError::Cardinality {
-                source_schema: "github".to_string(),
+                source_name: "github".to_string(),
                 table: "pull_requests".to_string(),
                 observed: 501,
                 cap: 500,
@@ -257,7 +257,7 @@ mod tests {
     fn resolver_rows_error_maps_to_structured_query_failure() {
         assert_structured_limit_error(
             &DependentJoinError::ResolverRows {
-                source_schema: "github".to_string(),
+                source_name: "github".to_string(),
                 table: "pull_requests".to_string(),
                 observed: 10001,
                 cap: 10000,
@@ -272,7 +272,7 @@ mod tests {
     fn rows_per_binding_error_maps_to_structured_query_failure() {
         assert_structured_limit_error(
             &DependentJoinError::RowsPerBinding {
-                source_schema: "github".to_string(),
+                source_name: "github".to_string(),
                 table: "pull_requests".to_string(),
                 observed: 1001,
                 cap: 1000,
@@ -287,7 +287,7 @@ mod tests {
     fn resolver_rows_per_binding_error_maps_to_structured_query_failure() {
         assert_structured_limit_error(
             &DependentJoinError::ResolverRowsPerBinding {
-                source_schema: "github".to_string(),
+                source_name: "github".to_string(),
                 table: "pull_requests".to_string(),
                 observed: 1001,
                 cap: 1000,

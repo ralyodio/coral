@@ -790,7 +790,7 @@ impl QueryRuntimeAdapter {
 
                 tracing::warn!(
                     target = "coral_engine::dependent_join",
-                    source = %cap_error.source_schema,
+                    source = %cap_error.source_name,
                     table = %cap_error.table,
                     observed = cap_error.observed,
                     cap = cap_error.cap,

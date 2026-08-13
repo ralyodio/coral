@@ -21,7 +21,7 @@ use crate::runtime::memory::{RetainedMemory, RetainedRecordBatches};
 #[derive(Clone, Copy)]
 pub(crate) struct BuildJoinedBatchesConfig<'a> {
     pub(crate) state: &'a DependentJoinRuntimeState,
-    pub(crate) dependent_source_schema: &'a str,
+    pub(crate) source_name: &'a str,
     pub(crate) dependent_table: &'a HttpTableSpec,
     pub(crate) binding_filters: &'a [String],
     pub(crate) literal_filters: &'a BTreeMap<String, String>,
@@ -38,7 +38,7 @@ pub(crate) fn build_joined_batches(
 ) -> Result<RetainedRecordBatches> {
     let dependent_schema = schema_from_columns(
         config.dependent_table.columns(),
-        config.dependent_source_schema,
+        config.source_name,
         config.dependent_table.name(),
     )?;
     let mut output_batches = RetainedRecordBatches::new(output_memory);

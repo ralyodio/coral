@@ -10,7 +10,7 @@ use crate::runtime::memory::RetainedMemory;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ResolverCaps {
-    pub(crate) source_schema: String,
+    pub(crate) source_name: String,
     pub(crate) table: String,
     pub(crate) max_bindings: usize,
     pub(crate) max_resolver_rows: usize,
@@ -199,7 +199,7 @@ impl DependentJoinRuntimeState {
 
 fn cardinality_exceeded(caps: &ResolverCaps, observed: usize) -> DataFusionError {
     DependentJoinError::Cardinality {
-        source_schema: caps.source_schema.clone(),
+        source_name: caps.source_name.clone(),
         table: caps.table.clone(),
         observed,
         cap: caps.max_bindings,
@@ -210,7 +210,7 @@ fn cardinality_exceeded(caps: &ResolverCaps, observed: usize) -> DataFusionError
 
 fn resolver_rows_exceeded(caps: &ResolverCaps, observed: usize) -> DataFusionError {
     DependentJoinError::ResolverRows {
-        source_schema: caps.source_schema.clone(),
+        source_name: caps.source_name.clone(),
         table: caps.table.clone(),
         observed,
         cap: caps.max_resolver_rows,
@@ -220,7 +220,7 @@ fn resolver_rows_exceeded(caps: &ResolverCaps, observed: usize) -> DataFusionErr
 
 fn resolver_rows_per_binding_exceeded(caps: &ResolverCaps, observed: usize) -> DataFusionError {
     DependentJoinError::ResolverRowsPerBinding {
-        source_schema: caps.source_schema.clone(),
+        source_name: caps.source_name.clone(),
         table: caps.table.clone(),
         observed,
         cap: caps.max_resolver_rows_per_binding,
@@ -249,7 +249,7 @@ mod tests {
         max_resolver_rows_per_binding: usize,
     ) -> ResolverCaps {
         ResolverCaps {
-            source_schema: "github".to_string(),
+            source_name: "github".to_string(),
             table: "pull_requests".to_string(),
             max_bindings,
             max_resolver_rows,
