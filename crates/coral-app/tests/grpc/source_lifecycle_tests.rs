@@ -187,6 +187,7 @@ async fn installed_v4_mcp_uses_public_catalog_identities() {
                 workspace: Some(default_workspace()),
                 sql: sql.to_string(),
                 guide_read_context: None,
+                task_attribution: None,
             }))
             .await
             .expect_err("former two-part MCP name must fail");
