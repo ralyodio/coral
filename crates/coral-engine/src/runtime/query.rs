@@ -421,13 +421,18 @@ fn validate_catalog_surface_namespace(
     let two_part_tables = tables
         .iter()
         .filter(|table| table.catalog_name.is_none())
-        .map(|table| (table.schema_name.as_str(), table.table_name.as_str()))
+        .map(|table| {
+            (
+                table.schema_name.to_ascii_lowercase(),
+                table.table_name.to_ascii_lowercase(),
+            )
+        })
         .collect::<HashSet<_>>();
     if let Some(function) = table_functions.iter().find(|function| {
         function.catalog_name.is_none()
             && two_part_tables.contains(&(
-                function.schema_name.as_str(),
-                function.function_name.as_str(),
+                function.schema_name.to_ascii_lowercase(),
+                function.function_name.to_ascii_lowercase(),
             ))
     }) {
         return Err(CoreError::FailedPrecondition(format!(
