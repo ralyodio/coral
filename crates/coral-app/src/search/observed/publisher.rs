@@ -530,9 +530,8 @@ mod tests {
 
         for source_name in ["github_v4", "github_mcp_v4"] {
             publisher.publish_source_scan(SourceScanObservation {
-                source_name,
+                sql_name: &SqlObjectName::new("datafusion", source_name, "list_issues"),
                 surface_kind: SourceObservationSurfaceKind::Table,
-                surface_name: "list_issues",
                 batch: &batch,
             });
         }

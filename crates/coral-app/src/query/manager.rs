@@ -1905,6 +1905,7 @@ mod tests {
             )],
             vec![QueryTableFunctionUsage::new(
                 "github",
+                None,
                 "github",
                 "search_runs",
             )],
